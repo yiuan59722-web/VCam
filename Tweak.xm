@@ -23,6 +23,17 @@ static UIButton *g_floatButton = nil;
 @implementation VCamFloatButton
 @end
 
+@interface VCamPassThroughWindow : UIWindow @end
+@implementation VCamPassThroughWindow
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = self.rootViewController.view;
+    for (UIView *sub in v.subviews) {
+        if (sub.userInteractionEnabled && CGRectContainsPoint(sub.frame, point)) return YES;
+    }
+    return NO;
+}
+@end
+
 static void setupFloatButton(void);
 static void handlePanGesture(UIPanGestureRecognizer *gesture);
 static void handleTapGesture(UITapGestureRecognizer *gesture);
@@ -55,7 +66,7 @@ static void setupFloatButton() {
         initWithTarget:g_floatButton action:@selector(handleTap:)];
     [g_floatButton addGestureRecognizer:tap];
     
-    g_overlayWindow = [[UIWindow alloc] initWithFrame:screen];
+    g_overlayWindow = [[VCamPassThroughWindow alloc] initWithFrame:screen];
     g_overlayWindow.windowLevel = UIWindowLevelAlert + 100;
     g_overlayWindow.hidden = NO;
     g_overlayWindow.backgroundColor = [UIColor clearColor];
