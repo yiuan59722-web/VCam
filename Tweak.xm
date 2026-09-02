@@ -26,6 +26,7 @@ static UIButton *g_floatButton = nil;
 @interface VCamPassThroughWindow : UIWindow @end
 @implementation VCamPassThroughWindow
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.rootViewController.presentedViewController) return YES;
     UIView *v = self.rootViewController.view;
     for (UIView *sub in v.subviews) {
         if (sub.userInteractionEnabled && CGRectContainsPoint(sub.frame, point)) return YES;
