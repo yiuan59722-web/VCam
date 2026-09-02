@@ -191,17 +191,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
 %group VCamHooks
 
-%hook AVCaptureSession
-- (void)startRunning { %orig; }
-- (void)stopRunning { %orig; }
-%end
 
-%hook AVCaptureVideoDataOutput
-- (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate 
-                          queue:(dispatch_queue_t)queue {
-    %orig;
-}
-%end
 
 // Intercept frame delegate callback -> substitute with fake frames
 %hook NSObject
@@ -221,18 +211,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 }
 %end
 
-%hook AVCapturePhotoOutput
-- (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings 
-                        delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
-    %orig;
-}
-%end
 
-%hook AVCaptureVideoPreviewLayer
-- (void)setSession:(AVCaptureSession *)session {
-    %orig;
-}
-%end
 
 %end // VCamHooks group
 
