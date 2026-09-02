@@ -12,6 +12,16 @@ static BOOL g_vcamEnabled = NO;
 static int g_vcamCount = 0;
 static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatButton = nil;
+static void vcamBadge(NSString *s) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_floatButton) return;
+        g_floatButton.titleLabel.adjustsFontSizeToFitWidth = YES;
+        g_floatButton.titleLabel.minimumScaleFactor = 0.3;
+        [g_floatButton setTitle:s forState:UIControlStateNormal];
+        [g_floatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    });
+}
+
 
 // ============================================================================
 // MARK: - 悬浮按钮 UI
@@ -58,6 +68,7 @@ static void setupFloatButton() {
         : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
     
     [g_floatButton setTitle:@"📷" forState:UIControlStateNormal];
+    vcamBadge(@"V5");
     g_floatButton.titleLabel.font = [UIFont systemFontOfSize:24];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] 
@@ -235,6 +246,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 %hook AVCaptureSession
 - (void)startRunning {
     NSLog(@"[VCam] session startRunning");
+    vcamBadge(@"S✓");
     %orig;
 }
 %end
@@ -245,6 +257,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         VCamDelegateProxy *proxy = [[VCamDelegateProxy alloc] init];
         proxy.original = delegate;
         NSLog(@"[VCam] wrap delegate cls=%@", NSStringFromClass([delegate class]));
+        vcamBadge([NSString stringWithFormat:@"W:%@", NSStringFromClass([delegate class])]);
         %orig(proxy, queue);
         return;
     }
@@ -267,6 +280,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
     g_vcamCount++;
     if (g_vcamCount == 1 || g_vcamCount % 60 == 0) {
         NSLog(@"[VCam] NSObject hook #%d cls=%@", g_vcamCount, NSStringFromClass([self class]));
+        vcamBadge([NSString stringWithFormat:@"N%d", g_vcamCount]);
     }
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
         CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
