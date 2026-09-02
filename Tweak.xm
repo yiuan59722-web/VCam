@@ -9,6 +9,7 @@
 // ============================================================================
 
 static BOOL g_vcamEnabled = NO;
+static int g_vcamCount = 0;
 static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatButton = nil;
 
@@ -206,11 +207,67 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
 
 // Intercept frame delegate callback -> substitute with fake frames
+@interface VCamDelegateProxy : NSObject
+@property (nonatomic, strong) id original;
+@end
+
+@implementation VCamDelegateProxy
+- (BOOL)respondsToSelector:(SEL)aSelector {
+    if ([super respondsToSelector:aSelector]) return YES;
+    return [self.original respondsToSelector:aSelector];
+}
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    return self.original;
+}
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
+        CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
+        if (fakeFrame) {
+            [self.original captureOutput:output didOutputSampleBuffer:fakeFrame fromConnection:connection];
+            CFRelease(fakeFrame);
+            return;
+        }
+    }
+    [self.original captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+}
+@end
+
+%hook AVCaptureSession
+- (void)startRunning {
+    NSLog(@"[VCam] session startRunning");
+    %orig;
+}
+%end
+
+%hook AVCaptureVideoDataOutput
+- (void)setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && ![delegate isKindOfClass:[VCamDelegateProxy class]]) {
+        VCamDelegateProxy *proxy = [[VCamDelegateProxy alloc] init];
+        proxy.original = delegate;
+        NSLog(@"[VCam] wrap delegate cls=%@", NSStringFromClass([delegate class]));
+        %orig(proxy, queue);
+        return;
+    }
+    %orig;
+}
+%end
+
+%hook AVCaptureMovieFileOutput
+- (void)startRecordingToOutputFileURL:(NSURL *)fileURL recordingDelegate:(id)delegate {
+    NSLog(@"[VCam] MovieFileOutput delegate=%@", NSStringFromClass([delegate class]));
+    %orig;
+}
+%end
+
 %hook NSObject
 - (void)captureOutput:(AVCaptureOutput *)output 
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer 
            fromConnection:(AVCaptureConnection *)connection {
     
+    g_vcamCount++;
+    if (g_vcamCount == 1 || g_vcamCount % 60 == 0) {
+        NSLog(@"[VCam] NSObject hook #%d cls=%@", g_vcamCount, NSStringFromClass([self class]));
+    }
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
         CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
         if (fakeFrame) {
