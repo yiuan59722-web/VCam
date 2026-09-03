@@ -12,6 +12,7 @@
 static BOOL g_vcamEnabled = NO;
 static int g_vcamCount = 0;
 static NSMutableDictionary *g_origFinishImps;
+static NSMutableDictionary *g_origFrameImps;
 static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatButton = nil;
 static void vcamBadge(NSString *s) {
@@ -215,6 +216,22 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 // MARK: - Hook AVCaptureSession / Video Output
 // ============================================================================
 
+static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+    IMP origImp = NULL;
+    NSValue *v = g_origFrameImps[NSStringFromClass([self class])];
+    if (v) origImp = (IMP)v.pointerValue;
+    void (*orig)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) = (void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp;
+    if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
+        CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
+        if (fakeFrame) {
+            if (orig) orig(self, _cmd, output, fakeFrame, connection);
+            CFRelease(fakeFrame);
+            return;
+        }
+    }
+    if (orig) orig(self, _cmd, output, sampleBuffer, connection);
+}
+
 static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL *fileURL, AVCaptureConnection *connection, NSError *error) {
     if (g_vcamEnabled && fileURL) {
         NSURL *srcURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"]];
@@ -277,13 +294,20 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 
 %hook AVCaptureVideoDataOutput
 - (void)setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:[VCamDelegateProxy class]]) {
-        VCamDelegateProxy *proxy = [[VCamDelegateProxy alloc] init];
-        proxy.original = delegate;
-        NSLog(@"[VCam] wrap delegate cls=%@", NSStringFromClass([delegate class]));
-        vcamBadge([NSString stringWithFormat:@"W:%@", NSStringFromClass([delegate class])]);
-        %orig(proxy, queue);
-        return;
+    if (delegate && g_origFrameImps) {
+        Class cls = [delegate class];
+        NSString *key = NSStringFromClass(cls);
+        if (!g_origFrameImps[key]) {
+            Method m = class_getInstanceMethod(cls, @selector(captureOutput:didOutputSampleBuffer:fromConnection:));
+            if (m) {
+                IMP origImp = method_setImplementation(m, (IMP)vcamFrameHook);
+                g_origFrameImps[key] = [NSValue valueWithPointer:(void *)origImp];
+                NSLog(@"[VCam] swizzled frames on %@", key);
+                vcamBadge([NSString stringWithFormat:@"W:%@", key]);
+            } else {
+                NSLog(@"[VCam] delegate %@ has no frame callback", key);
+            }
+        }
     }
     %orig;
 }
@@ -361,6 +385,7 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
     @autoreleasepool {
         g_pickerDelegate = [[VCamImagePickerControllerDelegate alloc] init];
         g_origFinishImps = [NSMutableDictionary new];
+        g_origFrameImps = [NSMutableDictionary new];
         
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
