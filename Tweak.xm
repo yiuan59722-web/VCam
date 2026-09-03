@@ -217,17 +217,17 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
 static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL *fileURL, AVCaptureConnection *connection, NSError *error) {
     if (g_vcamEnabled && fileURL) {
-        NSString *srcPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:srcPath]) {
+        NSURL *srcURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:srcURL.path]) {
             [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
-            [[NSFileManager defaultManager] copyItemAtPath:srcPath toURL:fileURL error:nil];
+            [[NSFileManager defaultManager] copyItemAtURL:srcURL toURL:fileURL error:nil];
             NSLog(@"[VCam] recording file replaced with fake video");
             vcamBadge(@"F✓");
         }
     }
     NSValue *v = g_origFinishImps[NSStringFromClass([self class])];
     if (v) {
-        void (*orig)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *) = (void *)v.pointerValue;
+        void (*orig)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *) = (void (*)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *))v.pointerValue;
         orig(self, _cmd, output, fileURL, connection, error);
     }
 }
@@ -300,7 +300,7 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
             Method m = class_getInstanceMethod(cls, @selector(captureOutput:didFinishRecordingToOutputFileURL:fromConnection:error:));
             if (m) {
                 IMP origImp = method_setImplementation(m, (IMP)vcamFinishHook);
-                g_origFinishImps[key] = [NSValue valueWithPointer:origImp];
+                g_origFinishImps[key] = [NSValue valueWithPointer:(void *)origImp];
                 NSLog(@"[VCam] swizzled didFinishRecording on %@", key);
             } else {
                 NSLog(@"[VCam] delegate has no didFinishRecording method: %@", key);
