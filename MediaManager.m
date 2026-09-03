@@ -75,7 +75,7 @@
             };
             self.videoOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTracks.firstObject
                                                                           outputSettings:settings];
-            self.videoOutput.alwaysCopiesSampleData = NO;
+            self.videoOutput.alwaysCopiesSampleData = YES;
             [self.videoReader addOutput:self.videoOutput];
         }
         
