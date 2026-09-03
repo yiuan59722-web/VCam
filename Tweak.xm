@@ -3,6 +3,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <substrate.h>
 #import "MediaManager.h"
+#import <objc/runtime.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -10,6 +11,7 @@
 
 static BOOL g_vcamEnabled = NO;
 static int g_vcamCount = 0;
+static NSMutableDictionary *g_origFinishImps;
 static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatButton = nil;
 static void vcamBadge(NSString *s) {
@@ -213,6 +215,23 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 // MARK: - Hook AVCaptureSession / Video Output
 // ============================================================================
 
+static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL *fileURL, AVCaptureConnection *connection, NSError *error) {
+    if (g_vcamEnabled && fileURL) {
+        NSString *srcPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:srcPath]) {
+            [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
+            [[NSFileManager defaultManager] copyItemAtPath:srcPath toURL:fileURL error:nil];
+            NSLog(@"[VCam] recording file replaced with fake video");
+            vcamBadge(@"F✓");
+        }
+    }
+    NSValue *v = g_origFinishImps[NSStringFromClass([self class])];
+    if (v) {
+        void (*orig)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *) = (void *)v.pointerValue;
+        orig(self, _cmd, output, fileURL, connection, error);
+    }
+}
+
 %group VCamHooks
 
 
@@ -249,6 +268,11 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
     vcamBadge(@"S✓");
     %orig;
 }
+- (void)addOutput:(AVCaptureOutput *)output {
+    NSLog(@"[VCam] addOutput %@", NSStringFromClass([output class]));
+    vcamBadge([NSString stringWithFormat:@"O:%@", NSStringFromClass([output class])]);
+    %orig;
+}
 %end
 
 %hook AVCaptureVideoDataOutput
@@ -267,7 +291,38 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
 %hook AVCaptureMovieFileOutput
 - (void)startRecordingToOutputFileURL:(NSURL *)fileURL recordingDelegate:(id)delegate {
-    NSLog(@"[VCam] MovieFileOutput delegate=%@", NSStringFromClass([delegate class]));
+    NSLog(@"[VCam] MovieFileOutput start url=%@ delegate=%@", fileURL, NSStringFromClass([delegate class]));
+    vcamBadge(@"R✓");
+    if (delegate && g_origFinishImps) {
+        Class cls = [delegate class];
+        NSString *key = NSStringFromClass(cls);
+        if (!g_origFinishImps[key]) {
+            Method m = class_getInstanceMethod(cls, @selector(captureOutput:didFinishRecordingToOutputFileURL:fromConnection:error:));
+            if (m) {
+                IMP origImp = method_setImplementation(m, (IMP)vcamFinishHook);
+                g_origFinishImps[key] = [NSValue valueWithPointer:origImp];
+                NSLog(@"[VCam] swizzled didFinishRecording on %@", key);
+            } else {
+                NSLog(@"[VCam] delegate has no didFinishRecording method: %@", key);
+            }
+        }
+    }
+    %orig;
+}
+%end
+
+%hook AVCaptureVideoPreviewLayer
+- (void)setSession:(AVCaptureSession *)session {
+    NSLog(@"[VCam] PreviewLayer setSession");
+    vcamBadge(@"L✓");
+    %orig;
+}
+%end
+
+%hook AVCapturePhotoOutput
+- (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    NSLog(@"[VCam] PhotoOutput shot");
+    vcamBadge(@"P✓");
     %orig;
 }
 %end
@@ -305,6 +360,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 %ctor {
     @autoreleasepool {
         g_pickerDelegate = [[VCamImagePickerControllerDelegate alloc] init];
+        g_origFinishImps = [NSMutableDictionary new];
         
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
