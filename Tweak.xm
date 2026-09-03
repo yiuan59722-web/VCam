@@ -71,7 +71,7 @@ static void setupFloatButton() {
         : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
     
     [g_floatButton setTitle:@"📷" forState:UIControlStateNormal];
-    vcamBadge(@"V5");
+    vcamBadge(@"V8");
     g_floatButton.titleLabel.font = [UIFont systemFontOfSize:24];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] 
@@ -224,6 +224,7 @@ static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBu
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
         CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
         if (fakeFrame) {
+            CFRetain(fakeFrame);
             if (orig) orig(self, _cmd, output, fakeFrame, connection);
             CFRelease(fakeFrame);
             return;
