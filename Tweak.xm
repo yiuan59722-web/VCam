@@ -4,6 +4,7 @@
 #import <substrate.h>
 #import "MediaManager.h"
 #import <objc/runtime.h>
+#import <CoreImage/CoreImage.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -71,7 +72,7 @@ static void setupFloatButton() {
         : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
     
     [g_floatButton setTitle:@"📷" forState:UIControlStateNormal];
-    vcamBadge(@"V8");
+    vcamBadge(@"V9");
     g_floatButton.titleLabel.font = [UIFont systemFontOfSize:24];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] 
@@ -216,6 +217,8 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 // MARK: - Hook AVCaptureSession / Video Output
 // ============================================================================
 
+static CIContext *g_vcamCIContext = nil;
+
 static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
     IMP origImp = NULL;
     NSValue *v = g_origFrameImps[NSStringFromClass([self class])];
@@ -223,12 +226,18 @@ static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBu
     void (*orig)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) = (void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp;
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
         CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
-        if (fakeFrame) {
-            CFRetain(fakeFrame);
-            if (orig) orig(self, _cmd, output, fakeFrame, connection);
-            CFRelease(fakeFrame);
-            return;
+        CVPixelBufferRef target = CMSampleBufferGetImageBuffer(sampleBuffer);
+        if (fakeFrame && target) {
+            CVPixelBufferRef srcPB = (CVPixelBufferRef)CMSampleBufferGetImageBuffer(fakeFrame);
+            if (srcPB) {
+                if (!g_vcamCIContext) g_vcamCIContext = [[CIContext alloc] init];
+                CIImage *img = [CIImage imageWithCVPixelBuffer:srcPB];
+                [g_vcamCIContext render:img toCVPixelBuffer:target];
+                g_vcamCount++;
+                if (g_vcamCount % 60 == 1) vcamBadge(@"P✓");
+            }
         }
+        if (fakeFrame) CFRelease(fakeFrame);
     }
     if (orig) orig(self, _cmd, output, sampleBuffer, connection);
 }
