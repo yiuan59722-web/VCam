@@ -149,7 +149,7 @@ static UIViewController *findTopViewController(void) {
     NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() 
         stringByAppendingPathComponent:@"vcam_input.mp4"]];
     [[NSFileManager defaultManager] removeItemAtURL:tempURL error:nil];
-    [[NSFileManager defaultManager] copyItemAtURL:url toURL:tempURL error:nil];
+    NSLog(@"[VCam] legacy picker disabled (no-copy policy)");
     
     [[MediaManager sharedManager] loadMediaFromURL:tempURL];
     g_vcamEnabled = YES;
@@ -164,6 +164,61 @@ static UIViewController *findTopViewController(void) {
 }
 
 @end
+
+static void vcamStartPlayback(id avAsset) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[MediaManager sharedManager] loadMediaFromAsset:(AVAsset *)avAsset];
+        [[NSFileManager defaultManager] removeItemAtPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"] error:nil];
+        g_vcamEnabled = YES;
+        [[MediaManager sharedManager] start];
+        vcamBadge(@"PLAY");
+        if (g_floatButton) g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
+    });
+}
+
+static void vcamRequestDirect(NSString *assetId, int attempt) {
+    Class phAssetCls = NSClassFromString(@"PHAsset");
+    id fetch = ((id (*)(id, SEL, NSArray *, id))objc_msgSend)(phAssetCls, sel_registerName("fetchAssetsWithLocalIdentifiers:options:"), @[assetId], nil);
+    NSUInteger cnt = ((NSUInteger (*)(id, SEL))objc_msgSend)(fetch, sel_registerName("count"));
+    if (cnt == 0) {
+        if (attempt < 6) {
+            NSLog(@"[VCam] fetch empty attempt=%d, retry", attempt);
+            vcamBadge(@"WAIT");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                vcamRequestDirect(assetId, attempt + 1);
+            });
+            return;
+        }
+        NSLog(@"[VCam] fetch still empty: photo access denied for this app");
+        vcamBadge(@"需照片权限");
+        return;
+    }
+    id phAsset = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(fetch, sel_registerName("objectAtIndex:"), (NSUInteger)0);
+    Class optCls = NSClassFromString(@"PHVideoRequestOptions");
+    id opts = optCls ? [[optCls alloc] init] : nil;
+    if (opts) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(opts, sel_registerName("setNetworkAccessAllowed:"), YES);
+        ((void (*)(id, SEL, long))objc_msgSend)(opts, sel_registerName("setDeliveryMode:"), (long)0);
+        ((void (*)(id, SEL, void (^)(double, NSError *, NSDictionary *, BOOL *)))objc_msgSend)(opts, sel_registerName("setProgressHandler:"),
+            ^(double progress, NSError *perr, NSDictionary *pinfo, BOOL *stop) {
+                vcamBadge([NSString stringWithFormat:@"DL%d", (int)(progress * 100)]);
+            });
+    }
+    id imgMgr = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHImageManager"), sel_registerName("defaultManager"));
+    ((void (*)(id, SEL, id, id, void (^)(id, id, NSDictionary *)))objc_msgSend)(
+        imgMgr, sel_registerName("requestAVAssetForVideo:options:completionHandler:"), phAsset, opts,
+        ^(id avAsset, id audioMix, NSDictionary *info) {
+            NSLog(@"[VCam] PHAsset direct asset=%@ inCloud=%@ err=%@",
+                  avAsset ? NSStringFromClass([avAsset class]) : @"nil",
+                  info[@"PHImageResultIsInCloudKey"] ? @"YES" : @"no",
+                  info[@"PHImageErrorKey"]);
+            if (!avAsset) { vcamBadge(@"读取失败"); return; }
+            vcamBadge(@"GOT");
+            vcamStartPlayback(avAsset);
+        });
+    NSLog(@"[VCam] using PHAsset direct read attempt=%d (NO copy, ever)", attempt);
+    vcamBadge(@"直读中");
+}
 
 @protocol VCamPHPickerShim <NSObject>
 - (void)picker:(id)picker didFinishPicking:(NSArray *)results;
@@ -197,60 +252,15 @@ static UIViewController *findTopViewController(void) {
     if (!loadUTI) { NSLog(@"[VCam] no usable movie UTI, abort"); vcamBadge(@"NO-UTI"); return; }
     NSLog(@"[VCam] load via %@", loadUTI);
 
-    // --- preferred: PHAsset direct read (zero copy) ---
+    // --- direct read ONLY: zero copy, no fallback duplication ever ---
     NSString *assetId = nil;
     @try { assetId = [results.firstObject valueForKey:@"assetIdentifier"]; } @catch (NSException *e) { NSLog(@"[VCam] assetIdentifier err %@", e); }
     if (assetId) {
-        Class phAssetCls = NSClassFromString(@"PHAsset");
-        id fetch = ((id (*)(id, SEL, NSArray *, id))objc_msgSend)(phAssetCls, sel_registerName("fetchAssetsWithLocalIdentifiers:options:"), @[assetId], nil);
-        NSUInteger cnt = ((NSUInteger (*)(id, SEL))objc_msgSend)(fetch, sel_registerName("count"));
-        if (cnt > 0) {
-            id phAsset = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(fetch, sel_registerName("objectAtIndex:"), (NSUInteger)0);
-            id imgMgr = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHImageManager"), sel_registerName("defaultManager"));
-            ((void (*)(id, SEL, id, id, void (^)(id, id, NSDictionary *)))objc_msgSend)(
-                imgMgr, sel_registerName("requestAVAssetForVideo:options:completionHandler:"), phAsset, nil,
-                ^(id avAsset, id audioMix, NSDictionary *info) {
-                    NSLog(@"[VCam] PHAsset direct asset=%@ info=%@", NSStringFromClass([avAsset class]), info[@"PHImageResultIsInCloudKey"]);
-                    if (!avAsset) { vcamBadge(@"PH-FAIL"); return; }
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [[MediaManager sharedManager] loadMediaFromAsset:(AVAsset *)avAsset];
-                        g_vcamEnabled = YES;
-                        [[MediaManager sharedManager] start];
-                        vcamBadge(@"PLAY");
-                        if (g_floatButton) g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
-                    });
-                });
-            NSLog(@"[VCam] using PHAsset direct read (no copy)");
-            vcamBadge(@"PH-DIRECT");
-            return;
-        }
-        NSLog(@"[VCam] assetId found but fetch empty");
-    } else {
-        NSLog(@"[VCam] no assetIdentifier (limited access?), fallback to copy");
+        vcamRequestDirect(assetId, 0);
+        return;
     }
-    [provider loadFileRepresentationForTypeIdentifier:loadUTI completionHandler:^(NSURL *localURL, NSError *error) {
-        if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
-        long long sz = 0;
-        NSDictionary *fa = [[NSFileManager defaultManager] attributesOfItemAtPath:localURL.path error:nil];
-        if (fa) sz = [fa fileSize];
-        NSLog(@"[VCam] got file %@ size=%lld", localURL.lastPathComponent, sz);
-        NSURL *dst = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"]];
-        [[NSFileManager defaultManager] removeItemAtURL:dst error:nil];
-        NSError *cerr = nil;
-        BOOL ok = [[NSFileManager defaultManager] copyItemAtURL:localURL toURL:dst error:&cerr];
-        NSLog(@"[VCam] picked copied=%d err=%@", ok, cerr);
-        [[NSFileManager defaultManager] removeItemAtURL:localURL error:nil]; // free system temp copy
-        if (!ok) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[MediaManager sharedManager] loadMediaFromURL:dst];
-            g_vcamEnabled = YES;
-            [[MediaManager sharedManager] start];
-            vcamBadge(@"PLAY");
-            if (g_floatButton) {
-                g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
-            }
-        });
-    }];
+    NSLog(@"[VCam] no assetIdentifier: set photo permission to All Photos for direct read");
+    vcamBadge(@"设所有照片权限");
 }
 @end
 
