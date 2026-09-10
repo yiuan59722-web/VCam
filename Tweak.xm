@@ -175,16 +175,39 @@ static UIViewController *findTopViewController(void) {
 @implementation VCamPHPickerDelegate
 - (void)picker:(id)picker didFinishPicking:(NSArray *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
+    NSLog(@"[VCam] phpicker done results=%lu", (unsigned long)results.count);
     if (results.count == 0) return;
     id provider = [results.firstObject itemProvider];
-    if (![provider hasItemConformingToTypeIdentifier:@"public.movie"]) return;
-    [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *localURL, NSError *error) {
+    NSArray *utis = [provider registeredTypeIdentifiers];
+    NSLog(@"[VCam] provider UTIs=%@", utis);
+    NSString *loadUTI = nil;
+    if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
+        loadUTI = @"public.movie";
+    } else if ([provider hasItemConformingToTypeIdentifier:@"public.audiovisual-content"]) {
+        loadUTI = @"public.audiovisual-content";
+    } else {
+        for (NSString *u in utis) {
+            NSString *lu = u.lowercaseString;
+            if ([lu hasPrefix:@"public."] && ([lu containsString:@"movie"] || [lu containsString:@"video"] || [lu containsString:@"audiovisual"])) {
+                loadUTI = u;
+                break;
+            }
+        }
+    }
+    if (!loadUTI) { NSLog(@"[VCam] no usable movie UTI, abort"); vcamBadge(@"NO-UTI"); return; }
+    NSLog(@"[VCam] load via %@", loadUTI);
+    [provider loadFileRepresentationForTypeIdentifier:loadUTI completionHandler:^(NSURL *localURL, NSError *error) {
         if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
+        long long sz = 0;
+        [localURL getResourceValue:nil forKey:NSURLFileSizeKey error:nil];
+        NSDictionary *fa = [[NSFileManager defaultManager] attributesOfItemAtPath:localURL.path error:nil];
+        if (fa) sz = [fa fileSize];
+        NSLog(@"[VCam] got file %@ size=%lld", localURL.lastPathComponent, sz);
         NSURL *dst = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"]];
         [[NSFileManager defaultManager] removeItemAtURL:dst error:nil];
         NSError *cerr = nil;
         BOOL ok = [[NSFileManager defaultManager] copyItemAtURL:localURL toURL:dst error:&cerr];
-        NSLog(@"[VCam] picked (no-transcode) copied=%d", ok);
+        NSLog(@"[VCam] picked copied=%d err=%@", ok, cerr);
         if (!ok) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             [[MediaManager sharedManager] loadMediaFromURL:dst];
