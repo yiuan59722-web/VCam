@@ -202,19 +202,36 @@ static void vcamRequestDirect(NSString *assetId, int attempt) {
     if (opts) {
         ((void (*)(id, SEL, BOOL))objc_msgSend)(opts, sel_registerName("setNetworkAccessAllowed:"), YES);
         ((void (*)(id, SEL, long))objc_msgSend)(opts, sel_registerName("setDeliveryMode:"), (long)0);
+        ((void (*)(id, SEL, long))objc_msgSend)(opts, sel_registerName("setVersion:"), (long)1); // original: skip edit rendering
         ((void (*)(id, SEL, void (^)(double, NSError *, NSDictionary *, BOOL *)))objc_msgSend)(opts, sel_registerName("setProgressHandler:"),
             ^(double progress, NSError *perr, NSDictionary *pinfo, BOOL *stop) {
                 vcamBadge([NSString stringWithFormat:@"DL%d", (int)(progress * 100)]);
             });
     }
     __block BOOL delivered = NO;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        if (!delivered) {
-            NSLog(@"[VCam] PHAsset request silent for 45s (big file preparing?)");
-            vcamBadge(@"大文件准备中");
-        }
-    });
+    __block BOOL channel2Fired = NO;
     id imgMgr = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHImageManager"), sel_registerName("defaultManager"));
+
+    void (^fireChannel2)(void) = ^{
+        if (delivered || channel2Fired) return;
+        channel2Fired = YES;
+        NSLog(@"[VCam] channel1 silent -> switching to requestPlayerItem");
+        vcamBadge(@"切换播放通道");
+        ((void (*)(id, SEL, id, id, void (^)(id, NSDictionary *)))objc_msgSend)(
+            imgMgr, sel_registerName("requestPlayerItemForVideo:options:resultHandler:"), phAsset, opts,
+            ^(id playerItem, NSDictionary *info) {
+                id avA = ((id (*)(id, SEL))objc_msgSend)(playerItem, sel_registerName("asset"));
+                NSLog(@"[VCam] playerItem route item=%@ asset=%@ err=%@",
+                      playerItem ? NSStringFromClass([playerItem class]) : @"nil",
+                      avA ? NSStringFromClass([avA class]) : @"nil",
+                      info[@"PHImageErrorKey"]);
+                if (!avA || delivered) return;
+                delivered = YES;
+                vcamBadge(@"GOT-CH2");
+                vcamStartPlayback(avA);
+            });
+    };
+
     ((void (*)(id, SEL, id, id, void (^)(id, id, NSDictionary *)))objc_msgSend)(
         imgMgr, sel_registerName("requestAVAssetForVideo:options:completionHandler:"), phAsset, opts,
         ^(id avAsset, id audioMix, NSDictionary *info) {
@@ -222,11 +239,17 @@ static void vcamRequestDirect(NSString *assetId, int attempt) {
                   avAsset ? NSStringFromClass([avAsset class]) : @"nil",
                   info[@"PHImageResultIsInCloudKey"] ? @"YES" : @"no",
                   info[@"PHImageErrorKey"]);
+            if (delivered) return;
+            if (!avAsset) { fireChannel2(); return; }
             delivered = YES;
-            if (!avAsset) { vcamBadge(@"读取失败"); return; }
             vcamBadge(@"GOT");
             vcamStartPlayback(avAsset);
         });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), fireChannel2);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!delivered) { NSLog(@"[VCam] both channels silent for 60s"); vcamBadge(@"仍无响应"); }
+    });
     NSLog(@"[VCam] using PHAsset direct read attempt=%d (NO copy, ever)", attempt);
     vcamBadge(@"直读中");
     });
