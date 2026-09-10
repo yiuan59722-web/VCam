@@ -28,6 +28,7 @@
         _loopPlayback = YES;
         _isRunning = NO;
         _videoSize = CGSizeMake(1920, 1080);
+        _trackTransform = CGAffineTransformIdentity;
         _decodeQueue = dispatch_queue_create("com.vcam.decode", DISPATCH_QUEUE_SERIAL);
         _startTime = kCMTimeZero;
         _frameIndex = 0;
@@ -58,6 +59,9 @@
             if (size.width > 0 && size.height > 0) {
                 self.videoSize = size;
             }
+            self.trackTransform = t;
+            NSLog(@"[VCam] video loaded %@ size=%.0fx%.0f t=(a=%.1f,b=%.1f,c=%.1f,d=%.1f,tx=%.1f,ty=%.1f)",
+                  url.lastPathComponent, size.width, size.height, t.a, t.b, t.c, t.d, t.tx, t.ty);
         }
         
         [self resetReaders];
