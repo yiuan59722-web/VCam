@@ -284,8 +284,25 @@ static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBu
                 if (srcPB) {
                     if (!g_vcamCIContext) g_vcamCIContext = [[CIContext alloc] init];
                     CIImage *img = [CIImage imageWithCVPixelBuffer:srcPB];
+                    // rotate per track preferredTransform (portrait videos stored landscape)
+                    img = [img imageByApplyingTransform:[[MediaManager sharedManager] trackTransform]];
+                    CGRect ie = img.extent;
+                    if (ie.origin.x != 0 || ie.origin.y != 0)
+                        img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(-ie.origin.x, -ie.origin.y)];
+                    // aspect-fill: cover target buffer, center-crop
+                    size_t tw = CVPixelBufferGetWidth(target), th = CVPixelBufferGetHeight(target);
+                    if (ie.size.width > 0.5 && ie.size.height > 0.5 && tw && th) {
+                        CGFloat s = MAX((CGFloat)tw / ie.size.width, (CGFloat)th / ie.size.height);
+                        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(s, s)];
+                        CGFloat dx = ((CGFloat)tw - ie.size.width * s) / 2.0;
+                        CGFloat dy = ((CGFloat)th - ie.size.height * s) / 2.0;
+                        if (dx != 0 || dy != 0)
+                            img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(dx, dy)];
+                    }
                     [g_vcamCIContext render:img toCVPixelBuffer:target];
                     g_vcamCount++;
+                    if (g_vcamCount == 1 || g_vcamCount % 300 == 0)
+                        NSLog(@"[VCam] paint src %.0fx%.0f -> target %zux%zu fmt=0x%x", ie.size.width, ie.size.height, tw, th, CVPixelBufferGetPixelFormatType(target));
                     if (g_vcamCount % 60 == 1) vcamBadge(@"P");
                 }
             }
