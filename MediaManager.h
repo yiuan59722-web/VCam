@@ -18,6 +18,7 @@ typedef NS_ENUM(NSInteger, VCamMode) {
 @property (nonatomic, strong, nullable) AVAssetReaderTrackOutput *videoOutput;
 @property (nonatomic, strong, nullable) AVAssetReaderTrackOutput *audioOutput;
 @property (nonatomic, assign) CGSize videoSize;
+@property (nonatomic, assign) CGAffineTransform trackTransform;
 @property (nonatomic, assign) CMTime videoDuration;
 @property (nonatomic, assign) BOOL loopPlayback;
 @property (nonatomic, assign) BOOL isRunning;
