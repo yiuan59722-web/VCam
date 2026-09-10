@@ -495,14 +495,15 @@ static IMP g_origDidAudioImp = NULL;
 static int s_didAudioCalls = 0;
 
 static void vcamDidAudioHook(id self, SEL _cmd, id audioArg) {
-    if (audioArg && CFGetTypeID((CFTypeRef)audioArg) == CMSampleBufferGetTypeID()) {
-        CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription((CMSampleBufferRef)audioArg);
+    CMSampleBufferRef sbArg = (__bridge CMSampleBufferRef)audioArg;
+    if (audioArg && CFGetTypeID((CFTypeRef)sbArg) == CMSampleBufferGetTypeID()) {
+        CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sbArg);
         FourCharCode mt = fmt ? CMFormatDescriptionGetMediaType(fmt) : 0;
         if (s_didAudioCalls == 0)
             NSLog(@"[VCam] pusher didOutputAudio CALLED first time mediaType=%4.4s", (const char *)&mt);
         s_didAudioCalls++;
         if (mt == kCMMediaType_Audio && g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
-            vcamFillAudioSampleBuffer((CMSampleBufferRef)audioArg);
+            vcamFillAudioSampleBuffer(sbArg);
         }
     } else if (s_didAudioCalls == 0) {
         NSLog(@"[VCam] pusher didOutputAudio called with arg type=%@", NSStringFromClass([audioArg class]));
