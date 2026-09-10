@@ -4,6 +4,7 @@
 #import <substrate.h>
 #import "MediaManager.h"
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <CoreImage/CoreImage.h>
 
 // ============================================================================
@@ -219,9 +220,9 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         if (!cfgCls || !pickCls) { vcamBadge(@"NO-PICK"); return; }
         id config = [[cfgCls alloc] init];
         [config setValue:@1 forKey:@"selectionLimit"];
-        id filter = [NSClassFromString(@"PHPickerFilter") performSelector:@selector(videos)];
+        id filter = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHPickerFilter"), sel_registerName("videos"));
         if (filter) [config setValue:filter forKey:@"filter"];
-        id picker = [[pickCls alloc] performSelector:@selector(initWithConfiguration:) withObject:config];
+        id picker = ((id (*)(id, SEL, id))objc_msgSend)([pickCls alloc], sel_registerName("initWithConfiguration:"), config);
         if (!g_phpDelegate) g_phpDelegate = [[VCamPHPickerDelegate alloc] init];
         [picker setValue:g_phpDelegate forKey:@"delegate"];
         [topVC presentViewController:picker animated:YES completion:nil];
