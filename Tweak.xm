@@ -491,16 +491,53 @@ static void vcamSetAudioBlockHook(id self, SEL _cmd, id block) {
         ((void (*)(id, SEL, id))g_origSetAudioBlockImp)(self, _cmd, block);
 }
 
+static IMP g_origDidAudioImp = NULL;
+static int s_didAudioCalls = 0;
+
+static void vcamDidAudioHook(id self, SEL _cmd, id audioArg) {
+    if (audioArg && CFGetTypeID((CFTypeRef)audioArg) == CMSampleBufferGetTypeID()) {
+        CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription((CMSampleBufferRef)audioArg);
+        FourCharCode mt = fmt ? CMFormatDescriptionGetMediaType(fmt) : 0;
+        if (s_didAudioCalls == 0)
+            NSLog(@"[VCam] pusher didOutputAudio CALLED first time mediaType=%4.4s", (const char *)&mt);
+        s_didAudioCalls++;
+        if (mt == kCMMediaType_Audio && g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
+            vcamFillAudioSampleBuffer((CMSampleBufferRef)audioArg);
+        }
+    } else if (s_didAudioCalls == 0) {
+        NSLog(@"[VCam] pusher didOutputAudio called with arg type=%@", NSStringFromClass([audioArg class]));
+        s_didAudioCalls++;
+    }
+    if (g_origDidAudioImp)
+        ((void (*)(id, SEL, id))g_origDidAudioImp)(self, _cmd, audioArg);
+}
+
 static void vcamTryHookPusher(void) {
     static BOOL s_hooked = NO;
     if (s_hooked) return;
     Class cls = NSClassFromString(@"XYLiveRtmpPusher");
     if (!cls) return;
-    Method m = class_getInstanceMethod(cls, @selector(setDidOutputAudioSampleBufferBlock:));
-    if (!m) return;
-    g_origSetAudioBlockImp = method_getImplementation(m);
-    method_setImplementation(m, (IMP)vcamSetAudioBlockHook);
     s_hooked = YES;
+    // dump all audio/mic related methods with type encodings
+    unsigned int mc = 0;
+    Method *ms = class_copyMethodList(cls, &mc);
+    for (unsigned int j = 0; j < mc; j++) {
+        NSString *sn = NSStringFromSelector(method_getName(ms[j]));
+        NSString *sl = sn.lowercaseString;
+        if ([sl containsString:@"audio"] || [sl containsString:@"sample"] || [sl containsString:@"mic"] ||
+            [sl containsString:@"voice"] || [sl containsString:@"pcm"]) {
+            NSLog(@"[VCam] PUSHER-METHOD %@ %@", sn, [NSString stringWithUTF8String:method_getTypeEncoding(ms[j])]);
+        }
+    }
+    free(ms);
+    Method m = class_getInstanceMethod(cls, @selector(didOutputAudioSampleBufferBlock:));
+    if (!m) {
+        NSLog(@"[VCam] pusher didOutputAudioSampleBufferBlock: NOT FOUND");
+        return;
+    }
+    NSLog(@"[VCam] didOutputAudioSampleBufferBlock: types=%@", [NSString stringWithUTF8String:method_getTypeEncoding(m)]);
+    g_origDidAudioImp = method_getImplementation(m);
+    method_setImplementation(m, (IMP)vcamDidAudioHook);
     NSLog(@"[VCam] XYLiveRtmpPusher audio hook installed");
 }
 
