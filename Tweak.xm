@@ -199,7 +199,6 @@ static UIViewController *findTopViewController(void) {
     [provider loadFileRepresentationForTypeIdentifier:loadUTI completionHandler:^(NSURL *localURL, NSError *error) {
         if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
         long long sz = 0;
-        [localURL getResourceValue:nil forKey:NSURLFileSizeKey error:nil];
         NSDictionary *fa = [[NSFileManager defaultManager] attributesOfItemAtPath:localURL.path error:nil];
         if (fa) sz = [fa fileSize];
         NSLog(@"[VCam] got file %@ size=%lld", localURL.lastPathComponent, sz);
