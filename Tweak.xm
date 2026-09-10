@@ -4,6 +4,7 @@
 #import <substrate.h>
 #import "MediaManager.h"
 #import <objc/runtime.h>
+static void vcamAudioRecon(void);
 #import <objc/message.h>
 #import <CoreImage/CoreImage.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -484,8 +485,8 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 
 %hook AVAudioEngine
 - (void)installTapOnBus:(NSUInteger)bus bufferSize:(AVAudioFrameCount)bufferSize format:(AVAudioFormat *)format queue:(dispatch_queue_t)queue handler:(void (^)(AVAudioPCMBuffer *, AVAudioTime *))handler {
-    NSLog(@"[VCam] PROBE AVAudioEngine tap bus=%lu fmt=%@ ch=%f rate=%f buf=%u",
-          (unsigned long)bus, format.formatDescription, format.channelCount, format.sampleRate, bufferSize);
+    NSLog(@"[VCam] PROBE AVAudioEngine tap bus=%lu ch=%u rate=%.0f buf=%u",
+          (unsigned long)bus, (unsigned)format.channelCount, format.sampleRate, bufferSize);
     %orig;
 }
 - (BOOL)startAndReturnError:(NSError **)error {
