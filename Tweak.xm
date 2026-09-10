@@ -5,7 +5,6 @@
 #import "MediaManager.h"
 #import <objc/runtime.h>
 #import <CoreImage/CoreImage.h>
-#import <PhotosUI/PhotosUI.h>
 #import <MobileCoreServices/MobileCoreServices.h>
 
 // ============================================================================
@@ -166,14 +165,18 @@ static UIViewController *findTopViewController(void) {
 
 @end
 
-@interface VCamPHPickerDelegate : NSObject <PHPickerViewControllerDelegate>
+@protocol VCamPHPickerShim <NSObject>
+- (void)picker:(id)picker didFinishPicking:(NSArray *)results;
+@end
+
+@interface VCamPHPickerDelegate : NSObject <VCamPHPickerShim>
 @end
 
 @implementation VCamPHPickerDelegate
-- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+- (void)picker:(id)picker didFinishPicking:(NSArray *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
     if (results.count == 0) return;
-    NSItemProvider *provider = results.firstObject.itemProvider;
+    id provider = [results.firstObject itemProvider];
     if (![provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) return;
     [provider loadFileRepresentationForTypeIdentifier:(NSString *)kUTTypeMovie completionHandler:^(NSURL *localURL, NSError *error) {
         if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
@@ -187,7 +190,7 @@ static UIViewController *findTopViewController(void) {
             [[MediaManager sharedManager] loadMediaFromURL:dst];
             g_vcamEnabled = YES;
             [[MediaManager sharedManager] start];
-            vcamBadge(@"▶");
+            vcamBadge(@"PLAY");
             if (g_floatButton) {
                 g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
             }
@@ -212,12 +215,16 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
     [alert addAction:[UIAlertAction actionWithTitle:@"选择视频" 
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         
-        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
-        config.filter = [PHPickerFilter videos];
-        config.selectionLimit = 1;
-        PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
+        Class cfgCls = NSClassFromString(@"PHPickerConfiguration");
+        Class pickCls = NSClassFromString(@"PHPickerViewController");
+        if (!cfgCls || !pickCls) { vcamBadge(@"NO-PICK"); return; }
+        id config = [[cfgCls alloc] init];
+        [config setValue:@1 forKey:@"selectionLimit"];
+        id filter = [NSClassFromString(@"PHPickerFilter") performSelector:@selector(videos)];
+        if (filter) [config setValue:filter forKey:@"filter"];
+        id picker = [[pickCls alloc] performSelector:@selector(initWithConfiguration:) withObject:config];
         if (!g_phpDelegate) g_phpDelegate = [[VCamPHPickerDelegate alloc] init];
-        picker.delegate = g_phpDelegate;
+        [picker setValue:g_phpDelegate forKey:@"delegate"];
         [topVC presentViewController:picker animated:YES completion:nil];
     }]];
     
