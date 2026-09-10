@@ -26,6 +26,7 @@ typedef NS_ENUM(NSInteger, VCamMode) {
 + (nonnull instancetype)sharedManager;
 
 - (void)loadMediaFromURL:(nonnull NSURL *)url;
+- (void)loadMediaFromAsset:(nonnull AVAsset *)asset;
 - (void)resetReaders;
 
 - (nullable CMSampleBufferRef)nextVideoFrame CF_RETURNS_RETAINED;
