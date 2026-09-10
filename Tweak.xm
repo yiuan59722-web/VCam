@@ -451,49 +451,6 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
     }
 }
 
-// ===== AudioUnit mic interception =====
-static AURenderCallback g_vcamOrigInputProc = NULL;
-static void *g_vcamOrigInputRefCon = NULL;
-static AudioUnit g_vcamAudioUnit = NULL;
-static int g_vcamAudioFillCount = 0;
-
-static OSStatus vcamRemoteInputWrapper(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
-    OSStatus st = g_vcamOrigInputProc ? g_vcamOrigInputProc(inRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData) : noErr;
-    if (ioData && ioData->mNumberBuffers > 0 && g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
-        AudioStreamBasicDescription asbd;
-        memset(&asbd, 0, sizeof(asbd));
-        UInt32 sz = sizeof(asbd);
-        BOOL haveFmt = (g_vcamAudioUnit && AudioUnitGetProperty(g_vcamAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, inBusNumber, &asbd, &sz) == noErr);
-        if (!haveFmt) {
-            asbd.mSampleRate = 48000.0;
-            asbd.mFormatID = kAudioFormatLinearPCM;
-            asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
-            asbd.mBitsPerChannel = 16;
-            asbd.mChannelsPerFrame = 1;
-            asbd.mBytesPerFrame = 2;
-            asbd.mFramesPerPacket = 1;
-            asbd.mBytesPerPacket = 2;
-        }
-        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
-            AudioBuffer b = ioData->mBuffers[i];
-            if (b.mData && b.mDataByteSize) {
-                if ([[MediaManager sharedManager] fillAudioBuffer:b.mData bytes:b.mDataByteSize asbd:&asbd]) {
-                    g_vcamAudioFillCount++;
-                    if (g_vcamAudioFillCount == 1) {
-                        NSLog(@"[VCam] AudioUnit fill start bus=%u fmt=%4.4s rate=%.0f ch=%u bits=%u float=%d bytes/frame=%u bufbytes=%u frames=%u",
-                              (unsigned)inBusNumber, (const char *)&asbd.mFormatID, asbd.mSampleRate,
-                              (unsigned)asbd.mChannelsPerFrame, (unsigned)asbd.mBitsPerChannel,
-                              (int)((asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0),
-                              (unsigned)asbd.mBytesPerFrame, (unsigned)b.mDataByteSize, (unsigned)inNumberFrames);
-                    }
-                    if (g_vcamAudioFillCount % 300 == 0) vcamBadge(@"A");
-                }
-            }
-        }
-    }
-    return st;
-}
-
 %group VCamHooks
 
 
@@ -523,28 +480,6 @@ static OSStatus vcamRemoteInputWrapper(void *inRefCon, AudioUnitRenderActionFlag
     [self.original captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
 }
 @end
-
-%hookf(OSStatus, AudioUnitSetProperty, AudioUnit inUnit, AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, const void *inData, UInt32 inDataSize) {
-    if (inData && (inID == 331 || inID == 1031)) {
-        @try {
-            AURenderCallbackStruct *cb = (AURenderCallbackStruct *)inData;
-            if (cb->inputProc && cb->inputProc != (AURenderCallback)vcamRemoteInputWrapper) {
-                g_vcamOrigInputProc = cb->inputProc;
-                g_vcamOrigInputRefCon = cb->inputProcRefCon;
-                g_vcamAudioUnit = inUnit;
-                AURenderCallbackStruct wrap;
-                wrap.inputProc = (AURenderCallback)vcamRemoteInputWrapper;
-                wrap.inputProcRefCon = cb->inputProcRefCon;
-                NSLog(@"[VCam] wrapped AudioUnit input callback prop=%u scope=%u elem=%u unit=%p",
-                      (unsigned)inID, (unsigned)inScope, (unsigned)inElement, (void *)inUnit);
-                return %orig(inUnit, inID, inScope, inElement, &wrap, sizeof(wrap));
-            }
-        } @catch (NSException *e) {
-            NSLog(@"[VCam] input cb wrap error %@", e);
-        }
-    }
-    return %orig;
-}
 
 %hook AVCaptureSession
 - (void)startRunning {
@@ -690,6 +625,10 @@ static OSStatus vcamRemoteInputWrapper(void *inRefCon, AudioUnitRenderActionFlag
         g_origFinishImps = [NSMutableDictionary new];
         g_origFrameImps = [NSMutableDictionary new];
         
+        NSSetUncaughtExceptionHandler(^(NSException *exception) {
+            NSLog(@"[VCam] UNCAUGHT %@ reason=%@ stack=%@", exception.name, exception.reason, [exception callStackSymbols]);
+        });
+
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
             %init(VCamHooks);
