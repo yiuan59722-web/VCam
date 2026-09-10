@@ -211,7 +211,6 @@ static void vcamRequestDirect(NSString *assetId, int attempt) {
             });
     }
     __block BOOL delivered = NO;
-    __block BOOL channel2Fired = NO;
     id imgMgr = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHImageManager"), sel_registerName("defaultManager"));
 
     // primary: player-item route (delivers in ~1s for huge local videos)
