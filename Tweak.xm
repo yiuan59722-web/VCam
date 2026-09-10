@@ -481,9 +481,38 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 }
 @end
 
+
+%hook AVAudioEngine
+- (void)installTapOnBus:(NSUInteger)bus bufferSize:(AVAudioFrameCount)bufferSize format:(AVAudioFormat *)format queue:(dispatch_queue_t)queue handler:(void (^)(AVAudioPCMBuffer *, AVAudioTime *))handler {
+    NSLog(@"[VCam] PROBE AVAudioEngine tap bus=%lu fmt=%@ ch=%f rate=%f buf=%u",
+          (unsigned long)bus, format.formatDescription, format.channelCount, format.sampleRate, bufferSize);
+    %orig;
+}
+- (BOOL)startAndReturnError:(NSError **)error {
+    NSLog(@"[VCam] PROBE AVAudioEngine start");
+    return %orig;
+}
+%end
+
+%hook AVAudioSession
+- (BOOL)setCategory:(NSString *)category mode:(NSString *)mode options:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
+    NSLog(@"[VCam] PROBE AVAudioSession cat=%@ mode=%@", category, mode);
+    return %orig;
+}
+- (BOOL)setActive:(BOOL)active error:(NSError **)outError {
+    NSLog(@"[VCam] PROBE AVAudioSession active=%d", active);
+    return %orig;
+}
+%end
+
 %hook AVCaptureSession
 - (void)startRunning {
     NSLog(@"[VCam] session startRunning");
+    static NSDate *lastRecon = nil;
+    if (!lastRecon || -[lastRecon timeIntervalSinceNow] < -30) {
+        lastRecon = [NSDate date];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ vcamAudioRecon(); });
+    }
     vcamBadge(@"S✓");
     %orig;
 }
@@ -628,10 +657,18 @@ static void vcamAudioRecon(void) {
         NSString *name = NSStringFromClass(c);
         if (!name) continue;
         NSString *lower = name.lowercaseString;
+        BOOL uiJunk = ([lower hasSuffix:@"view"] || [lower hasSuffix:@"cell"] || [lower hasSuffix:@"button"] ||
+                       [lower hasSuffix:@"bar"] || [lower hasSuffix:@"section"] || [lower hasSuffix:@"bubble"] ||
+                       [lower hasSuffix:@"label"] || [lower hasSuffix:@"panel"] || [lower hasSuffix:@"control"] ||
+                       [lower containsString:@"viewcontroller"] || [lower hasSuffix:@"operation"] ||
+                       [lower hasPrefix:@"si"] || [lower hasPrefix:@"anc"] || [lower hasPrefix:@"du"] ||
+                       [lower hasPrefix:@"awd"] || [lower hasPrefix:@"vc"] || [lower hasPrefix:@"mip"] ||
+                       [lower hasPrefix:@"icpa"] || [lower hasPrefix:@"vl"] || [lower hasPrefix:@"ck"] ||
+                       [lower hasPrefix:@"inui"]);
         BOOL interesting = ([lower containsString:@"audio"] || [lower containsString:@"voice"] ||
-                            [lower containsString:@"microphone"] || [lower containsString:@"recorder"]) &&
-                           !([lower hasPrefix:@"av"] || [lower hasPrefix:@"ns"] || [lower hasPrefix:@"_"] ||
-                             [lower hasPrefix:@"as"] || [lower hasPrefix:@"cn"] || [lower containsString:@"apple"]);
+                            [lower containsString:@"microphone"] || [lower containsString:@"engine"] ||
+                            [lower containsString:@"capture"] || [lower containsString:@"publish"] ||
+                            [lower containsString:@"pushstream"] || [lower containsString:@"rtmp"]) && !uiJunk;
         if (!interesting) continue;
         unsigned int mc = 0;
         Method *ms = class_copyMethodList(c, &mc);
