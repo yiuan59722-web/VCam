@@ -617,6 +617,10 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 // MARK: - Constructor
 // ============================================================================
 
+static void vcamUncaughtHandler(NSException *exception) {
+    NSLog(@"[VCam] UNCAUGHT %@ reason=%@ stack=%@", exception.name, exception.reason, [exception callStackSymbols]);
+}
+
 %ctor {
     @autoreleasepool {
         g_pickerDelegate = [[VCamImagePickerControllerDelegate alloc] init];
@@ -625,9 +629,7 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
         g_origFinishImps = [NSMutableDictionary new];
         g_origFrameImps = [NSMutableDictionary new];
         
-        NSSetUncaughtExceptionHandler(^(NSException *exception) {
-            NSLog(@"[VCam] UNCAUGHT %@ reason=%@ stack=%@", exception.name, exception.reason, [exception callStackSymbols]);
-        });
+        NSSetUncaughtExceptionHandler(vcamUncaughtHandler);
 
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
