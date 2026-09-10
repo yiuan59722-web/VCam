@@ -40,8 +40,15 @@
 #pragma mark - Media Loading
 
 - (void)loadMediaFromURL:(NSURL *)url {
+    [self loadAsset:[AVAsset assetWithURL:url] desc:url.path];
+}
+
+- (void)loadMediaFromAsset:(AVAsset *)asset {
+    [self loadAsset:asset desc:@"PHAsset-direct"];
+}
+
+- (void)loadAsset:(AVAsset *)asset desc:(NSString *)desc {
     dispatch_async(_decodeQueue, ^{
-        AVAsset *asset = [AVAsset assetWithURL:url];
         if (!asset) return;
         
         self.currentAsset = asset;
@@ -60,8 +67,8 @@
                 self.videoSize = size;
             }
             self.trackTransform = t;
-            NSLog(@"[VCam] video loaded %@ size=%.0fx%.0f t=(a=%.1f,b=%.1f,c=%.1f,d=%.1f,tx=%.1f,ty=%.1f)",
-                  url.lastPathComponent, size.width, size.height, t.a, t.b, t.c, t.d, t.tx, t.ty);
+            NSLog(@"[VCam] video loaded [%@] size=%.0fx%.0f t=(a=%.1f,b=%.1f,c=%.1f,d=%.1f,tx=%.1f,ty=%.1f)",
+                  desc, size.width, size.height, t.a, t.b, t.c, t.d, t.tx, t.ty);
         } else {
             NSLog(@"[VCam] WARN: no video tracks in %@", url.path);
         }
