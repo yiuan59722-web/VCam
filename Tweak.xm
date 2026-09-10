@@ -5,7 +5,6 @@
 #import "MediaManager.h"
 #import <objc/runtime.h>
 #import <CoreImage/CoreImage.h>
-#import <MobileCoreServices/MobileCoreServices.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -177,8 +176,8 @@ static UIViewController *findTopViewController(void) {
     [picker dismissViewControllerAnimated:YES completion:nil];
     if (results.count == 0) return;
     id provider = [results.firstObject itemProvider];
-    if (![provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) return;
-    [provider loadFileRepresentationForTypeIdentifier:(NSString *)kUTTypeMovie completionHandler:^(NSURL *localURL, NSError *error) {
+    if (![provider hasItemConformingToTypeIdentifier:@"public.movie"]) return;
+    [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *localURL, NSError *error) {
         if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
         NSURL *dst = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"]];
         [[NSFileManager defaultManager] removeItemAtURL:dst error:nil];
