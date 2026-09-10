@@ -617,6 +617,44 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 // MARK: - Constructor
 // ============================================================================
 
+// ===== audio recon: map XHS's own audio engine classes =====
+static void vcamAudioRecon(void) {
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses <= 0) return;
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    numClasses = objc_getClassList(classes, numClasses);
+    for (int i = 0; i < numClasses; i++) {
+        Class c = classes[i];
+        NSString *name = NSStringFromClass(c);
+        if (!name) continue;
+        NSString *lower = name.lowercaseString;
+        BOOL interesting = ([lower containsString:@"audio"] || [lower containsString:@"voice"] ||
+                            [lower containsString:@"microphone"] || [lower containsString:@"recorder"]) &&
+                           !([lower hasPrefix:@"av"] || [lower hasPrefix:@"ns"] || [lower hasPrefix:@"_"] ||
+                             [lower hasPrefix:@"as"] || [lower hasPrefix:@"cn"] || [lower containsString:@"apple"]);
+        if (!interesting) continue;
+        unsigned int mc = 0;
+        Method *ms = class_copyMethodList(c, &mc);
+        NSMutableArray *sels = [NSMutableArray array];
+        for (unsigned int j = 0; j < mc; j++) {
+            NSString *sn = NSStringFromSelector(method_getName(ms[j]));
+            NSString *sl = sn.lowercaseString;
+            if ([sl containsString:@"render"] || [sl containsString:@"capture"] || [sl containsString:@"read"] ||
+                [sl containsString:@"tap"] || [sl containsString:@"input"] || [sl containsString:@"sample"] ||
+                [sl containsString:@"buffer"] || [sl containsString:@"callback"] || [sl containsString:@"start"] ||
+                [sl containsString:@"unit"]) {
+                [sels addObject:sn];
+            }
+        }
+        if (sels.count > 0) {
+            NSLog(@"[VCam] RECON %@ (%u methods, hits): %@", name, mc, sels);
+        }
+        free(ms);
+    }
+    free(classes);
+    NSLog(@"[VCam] RECON done");
+}
+
 static void vcamUncaughtHandler(NSException *exception) {
     NSLog(@"[VCam] UNCAUGHT %@ reason=%@ stack=%@", exception.name, exception.reason, [exception callStackSymbols]);
 }
@@ -630,6 +668,10 @@ static void vcamUncaughtHandler(NSException *exception) {
         g_origFrameImps = [NSMutableDictionary new];
         
         NSSetUncaughtExceptionHandler(vcamUncaughtHandler);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                vcamAudioRecon();
+            });
 
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
