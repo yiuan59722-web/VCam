@@ -472,25 +472,6 @@ static void vcamFillAudioSampleBuffer(CMSampleBufferRef sampleBuffer) {
     }
 }
 
-static IMP g_origSetAudioBlockImp = NULL;
-
-static void vcamSetAudioBlockHook(id self, SEL _cmd, id block) {
-    if (block && g_origSetAudioBlockImp) {
-        void (^orig)(CMSampleBufferRef) = (void (^)(CMSampleBufferRef))block;
-        void (^wrap)(CMSampleBufferRef) = ^(CMSampleBufferRef sb) {
-            if (g_vcamEnabled && [[MediaManager sharedManager] isRunning] && sb) {
-                vcamFillAudioSampleBuffer(sb);
-            }
-            orig(sb);
-        };
-        NSLog(@"[VCam] pusher audio block wrapped");
-        ((void (*)(id, SEL, id))g_origSetAudioBlockImp)(self, _cmd, [wrap copy]);
-        return;
-    }
-    if (g_origSetAudioBlockImp)
-        ((void (*)(id, SEL, id))g_origSetAudioBlockImp)(self, _cmd, block);
-}
-
 static IMP g_origDidAudioImp = NULL;
 static int s_didAudioCalls = 0;
 
