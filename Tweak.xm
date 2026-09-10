@@ -261,8 +261,17 @@ static CIContext *g_vcamCIContext = nil;
 
 static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
     IMP origImp = NULL;
-    NSValue *v = g_origFrameImps[NSStringFromClass([self class])];
-    if (v) origImp = (IMP)v.pointerValue;
+    {
+        Class wc = [self class];
+        while (wc != nil) {
+            NSValue *v = g_origFrameImps[NSStringFromClass(wc)];
+            if (v && v.pointerValue != NULL && v.pointerValue != (void *)vcamFrameHook) {
+                origImp = (IMP)v.pointerValue;
+                break;
+            }
+            wc = class_getSuperclass(wc);
+        }
+    }
     void (*orig)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) = (void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp;
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
         CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sampleBuffer);
@@ -307,9 +316,20 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
             vcamBadge(@"F✓");
         }
     }
-    NSValue *v = g_origFinishImps[NSStringFromClass([self class])];
-    if (v) {
-        void (*orig)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *) = (void (*)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *))v.pointerValue;
+    IMP origFin = NULL;
+    {
+        Class wc = [self class];
+        while (wc != nil) {
+            NSValue *v = g_origFinishImps[NSStringFromClass(wc)];
+            if (v && v.pointerValue != NULL && v.pointerValue != (void *)vcamFinishHook) {
+                origFin = (IMP)v.pointerValue;
+                break;
+            }
+            wc = class_getSuperclass(wc);
+        }
+    }
+    if (origFin) {
+        void (*orig)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *) = (void (*)(id, SEL, AVCaptureFileOutput *, NSURL *, AVCaptureConnection *, NSError *))origFin;
         orig(self, _cmd, output, fileURL, connection, error);
     }
 }
@@ -364,13 +384,19 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
         NSString *key = NSStringFromClass(cls);
         if (!g_origFrameImps[key]) {
             Method m = class_getInstanceMethod(cls, @selector(captureOutput:didOutputSampleBuffer:fromConnection:));
-            if (m) {
+            Class superCls = class_getSuperclass(cls);
+            BOOL inheritedMethod = (m && superCls && class_getInstanceMethod(superCls, @selector(captureOutput:didOutputSampleBuffer:fromConnection:)) == m);
+            if (m && !inheritedMethod) {
                 IMP origImp = method_setImplementation(m, (IMP)vcamFrameHook);
-                g_origFrameImps[key] = [NSValue valueWithPointer:(void *)origImp];
-                NSLog(@"[VCam] swizzled frames on %@", key);
-                vcamBadge([NSString stringWithFormat:@"W:%@", key]);
-            } else {
+                if (origImp != (IMP)vcamFrameHook) {
+                    g_origFrameImps[key] = [NSValue valueWithPointer:(void *)origImp];
+                    NSLog(@"[VCam] swizzled frames on %@", key);
+                    vcamBadge([NSString stringWithFormat:@"W:%@", key]);
+                }
+            } else if (!m) {
                 NSLog(@"[VCam] delegate %@ has no frame callback", key);
+            } else {
+                NSLog(@"[VCam] skip hook on %@ (inherited, hooked on superclass)", key);
             }
         }
     }
@@ -387,12 +413,16 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
         NSString *key = NSStringFromClass(cls);
         if (!g_origFinishImps[key]) {
             Method m = class_getInstanceMethod(cls, @selector(captureOutput:didFinishRecordingToOutputFileURL:fromConnection:error:));
-            if (m) {
+            Class superCls = class_getSuperclass(cls);
+            BOOL inheritedMethod = (m && superCls && class_getInstanceMethod(superCls, @selector(captureOutput:didFinishRecordingToOutputFileURL:fromConnection:error:)) == m);
+            if (m && !inheritedMethod) {
                 IMP origImp = method_setImplementation(m, (IMP)vcamFinishHook);
-                g_origFinishImps[key] = [NSValue valueWithPointer:(void *)origImp];
-                NSLog(@"[VCam] swizzled didFinishRecording on %@", key);
+                if (origImp != (IMP)vcamFinishHook) {
+                    g_origFinishImps[key] = [NSValue valueWithPointer:(void *)origImp];
+                    NSLog(@"[VCam] swizzled didFinishRecording on %@", key);
+                }
             } else {
-                NSLog(@"[VCam] delegate has no didFinishRecording method: %@", key);
+                NSLog(@"[VCam] skip finish hook on %@ (inherited=%d)", key, inheritedMethod);
             }
         }
     }
@@ -423,10 +453,16 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
         NSString *key = NSStringFromClass(cls);
         if (!g_origFrameImps[key]) {
             Method m = class_getInstanceMethod(cls, @selector(captureOutput:didOutputSampleBuffer:fromConnection:));
-            if (m) {
+            Class superCls = class_getSuperclass(cls);
+            BOOL inheritedMethod = (m && superCls && class_getInstanceMethod(superCls, @selector(captureOutput:didOutputSampleBuffer:fromConnection:)) == m);
+            if (m && !inheritedMethod) {
                 IMP origImp = method_setImplementation(m, (IMP)vcamFrameHook);
-                g_origFrameImps[key] = [NSValue valueWithPointer:(void *)origImp];
-                NSLog(@"[VCam] swizzled audio frames on %@", key);
+                if (origImp != (IMP)vcamFrameHook) {
+                    g_origFrameImps[key] = [NSValue valueWithPointer:(void *)origImp];
+                    NSLog(@"[VCam] swizzled audio frames on %@", key);
+                }
+            } else {
+                NSLog(@"[VCam] skip audio hook on %@ (inherited=%d)", key, inheritedMethod);
             }
         }
     }
