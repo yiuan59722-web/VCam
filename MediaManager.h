@@ -29,6 +29,7 @@ typedef NS_ENUM(NSInteger, VCamMode) {
 
 - (nullable CMSampleBufferRef)nextVideoFrame CF_RETURNS_RETAINED;
 - (nullable CMSampleBufferRef)nextAudioFrame CF_RETURNS_RETAINED;
+- (BOOL)fillAudioBuffer:(void *)dst bytes:(size_t)bytes asbd:(const AudioStreamBasicDescription *)asbd;
 - (nullable CMSampleBufferRef)generateBlackFrameWithSize:(CGSize)size
                                          presentationTime:(CMTime)pts CF_RETURNS_RETAINED;
 
