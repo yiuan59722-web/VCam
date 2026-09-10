@@ -196,6 +196,38 @@ static UIViewController *findTopViewController(void) {
     }
     if (!loadUTI) { NSLog(@"[VCam] no usable movie UTI, abort"); vcamBadge(@"NO-UTI"); return; }
     NSLog(@"[VCam] load via %@", loadUTI);
+
+    // --- preferred: PHAsset direct read (zero copy) ---
+    NSString *assetId = nil;
+    @try { assetId = [results.firstObject valueForKey:@"assetIdentifier"]; } @catch (NSException *e) { NSLog(@"[VCam] assetIdentifier err %@", e); }
+    if (assetId) {
+        Class phAssetCls = NSClassFromString(@"PHAsset");
+        id fetch = ((id (*)(id, SEL, NSArray *, id))objc_msgSend)(phAssetCls, sel_registerName("fetchAssetsWithLocalIdentifiers:options:"), @[assetId], nil);
+        NSUInteger cnt = ((NSUInteger (*)(id, SEL))objc_msgSend)(fetch, sel_registerName("count"));
+        if (cnt > 0) {
+            id phAsset = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(fetch, sel_registerName("objectAtIndex:"), (NSUInteger)0);
+            id imgMgr = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHImageManager"), sel_registerName("defaultManager"));
+            ((void (*)(id, SEL, id, id, void (^)(id, id, NSDictionary *)))objc_msgSend)(
+                imgMgr, sel_registerName("requestAVAssetForVideo:options:completionHandler:"), phAsset, nil,
+                ^(id avAsset, id audioMix, NSDictionary *info) {
+                    NSLog(@"[VCam] PHAsset direct asset=%@ info=%@", NSStringFromClass([avAsset class]), info[@"PHImageResultIsInCloudKey"]);
+                    if (!avAsset) { vcamBadge(@"PH-FAIL"); return; }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [[MediaManager sharedManager] loadMediaFromAsset:(AVAsset *)avAsset];
+                        g_vcamEnabled = YES;
+                        [[MediaManager sharedManager] start];
+                        vcamBadge(@"PLAY");
+                        if (g_floatButton) g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
+                    });
+                });
+            NSLog(@"[VCam] using PHAsset direct read (no copy)");
+            vcamBadge(@"PH-DIRECT");
+            return;
+        }
+        NSLog(@"[VCam] assetId found but fetch empty");
+    } else {
+        NSLog(@"[VCam] no assetIdentifier (limited access?), fallback to copy");
+    }
     [provider loadFileRepresentationForTypeIdentifier:loadUTI completionHandler:^(NSURL *localURL, NSError *error) {
         if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
         long long sz = 0;
@@ -207,6 +239,7 @@ static UIViewController *findTopViewController(void) {
         NSError *cerr = nil;
         BOOL ok = [[NSFileManager defaultManager] copyItemAtURL:localURL toURL:dst error:&cerr];
         NSLog(@"[VCam] picked copied=%d err=%@", ok, cerr);
+        [[NSFileManager defaultManager] removeItemAtURL:localURL error:nil]; // free system temp copy
         if (!ok) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             [[MediaManager sharedManager] loadMediaFromURL:dst];
@@ -244,6 +277,8 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         [config setValue:@1 forKey:@"selectionLimit"];
         id filter = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHPickerFilter"), sel_registerName("videos"));
         if (filter) [config setValue:filter forKey:@"filter"];
+        id phLib = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHPhotoLibrary"), sel_registerName("sharedPhotoLibrary"));
+        if (phLib) [config setValue:phLib forKey:@"photoLibrary"];
         id picker = ((id (*)(id, SEL, id))objc_msgSend)([pickCls alloc], sel_registerName("initWithConfiguration:"), config);
         if (!g_phpDelegate) g_phpDelegate = [[VCamPHPickerDelegate alloc] init];
         [picker setValue:g_phpDelegate forKey:@"delegate"];
@@ -542,6 +577,8 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 %ctor {
     @autoreleasepool {
         g_pickerDelegate = [[VCamImagePickerControllerDelegate alloc] init];
+        // free stale copied videos from previous sessions (can be many GB)
+        [[NSFileManager defaultManager] removeItemAtPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"] error:nil];
         g_origFinishImps = [NSMutableDictionary new];
         g_origFrameImps = [NSMutableDictionary new];
         
