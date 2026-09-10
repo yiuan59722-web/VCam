@@ -452,6 +452,66 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
     }
 }
 
+// ===== live pusher audio interception (XYLiveRtmpPusher) =====
+static void vcamFillAudioSampleBuffer(CMSampleBufferRef sampleBuffer) {
+    CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sampleBuffer);
+    CMAudioFormatDescriptionRef afmt = (CMAudioFormatDescriptionRef)fmt;
+    const AudioStreamBasicDescription *asbd = afmt ? CMAudioFormatDescriptionGetStreamBasicDescription(afmt) : NULL;
+    CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sampleBuffer);
+    size_t alen = 0; char *aptr = NULL;
+    if (bb && asbd && CMBlockBufferGetDataPointer(bb, 0, NULL, &alen, &aptr) == kCMBlockBufferNoErr && aptr && alen) {
+        if ([[MediaManager sharedManager] fillAudioBuffer:aptr bytes:alen asbd:asbd]) {
+            static int s_afill = 0;
+            s_afill++;
+            if (s_afill == 1)
+                NSLog(@"[VCam] pusher audio fill start fmt=%4.4s rate=%.0f ch=%u bits=%u float=%d bytes=%zu",
+                      (const char *)&asbd->mFormatID, asbd->mSampleRate, (unsigned)asbd->mChannelsPerFrame,
+                      (unsigned)asbd->mBitsPerChannel, (int)((asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0), alen);
+            if (s_afill % 300 == 0) vcamBadge(@"A");
+        }
+    }
+}
+
+static IMP g_origSetAudioBlockImp = NULL;
+
+static void vcamSetAudioBlockHook(id self, SEL _cmd, id block) {
+    if (block && g_origSetAudioBlockImp) {
+        void (^orig)(CMSampleBufferRef) = (void (^)(CMSampleBufferRef))block;
+        void (^wrap)(CMSampleBufferRef) = ^(CMSampleBufferRef sb) {
+            if (g_vcamEnabled && [[MediaManager sharedManager] isRunning] && sb) {
+                vcamFillAudioSampleBuffer(sb);
+            }
+            orig(sb);
+        };
+        NSLog(@"[VCam] pusher audio block wrapped");
+        ((void (*)(id, SEL, id))g_origSetAudioBlockImp)(self, _cmd, [wrap copy]);
+        return;
+    }
+    if (g_origSetAudioBlockImp)
+        ((void (*)(id, SEL, id))g_origSetAudioBlockImp)(self, _cmd, block);
+}
+
+static void vcamTryHookPusher(void) {
+    static BOOL s_hooked = NO;
+    if (s_hooked) return;
+    Class cls = NSClassFromString(@"XYLiveRtmpPusher");
+    if (!cls) return;
+    Method m = class_getInstanceMethod(cls, @selector(setDidOutputAudioSampleBufferBlock:));
+    if (!m) return;
+    g_origSetAudioBlockImp = method_getImplementation(m);
+    method_setImplementation(m, (IMP)vcamSetAudioBlockHook);
+    s_hooked = YES;
+    NSLog(@"[VCam] XYLiveRtmpPusher audio hook installed");
+}
+
+static void vcamPollPusher(int attempt) {
+    vcamTryHookPusher();
+    if (attempt > 120) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        vcamPollPusher(attempt + 1);
+    });
+}
+
 %group VCamHooks
 
 
@@ -509,6 +569,7 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 %hook AVCaptureSession
 - (void)startRunning {
     NSLog(@"[VCam] session startRunning");
+    vcamTryHookPusher();
     static NSDate *lastRecon = nil;
     if (!lastRecon || -[lastRecon timeIntervalSinceNow] < -30) {
         lastRecon = [NSDate date];
@@ -706,6 +767,7 @@ static void vcamUncaughtHandler(NSException *exception) {
         g_origFrameImps = [NSMutableDictionary new];
         
         NSSetUncaughtExceptionHandler(vcamUncaughtHandler);
+        vcamPollPusher(0);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
             dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 vcamAudioRecon();
