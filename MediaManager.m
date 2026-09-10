@@ -62,6 +62,8 @@
             self.trackTransform = t;
             NSLog(@"[VCam] video loaded %@ size=%.0fx%.0f t=(a=%.1f,b=%.1f,c=%.1f,d=%.1f,tx=%.1f,ty=%.1f)",
                   url.lastPathComponent, size.width, size.height, t.a, t.b, t.c, t.d, t.tx, t.ty);
+        } else {
+            NSLog(@"[VCam] WARN: no video tracks in %@", url.path);
         }
         
         [self resetReaders];
