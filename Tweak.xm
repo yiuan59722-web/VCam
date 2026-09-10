@@ -467,9 +467,98 @@ static void vcamFillAudioSampleBuffer(CMSampleBufferRef sampleBuffer) {
                 NSLog(@"[VCam] pusher audio fill start fmt=%4.4s rate=%.0f ch=%u bits=%u float=%d bytes=%zu",
                       (const char *)&asbd->mFormatID, asbd->mSampleRate, (unsigned)asbd->mChannelsPerFrame,
                       (unsigned)asbd->mBitsPerChannel, (int)((asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0), alen);
-            if (s_afill % 300 == 0) vcamBadge(@"A");
+            if (s_afill % 300 == 0) vcamBadge(@"D");
         }
     }
+}
+
+// ---- new: receiveAudioDataByDevice: raw PCM entry (XYCaptureAudioData=^viIq) ----
+typedef struct {
+    void *data;        // 0
+    int   length;      // 8
+    unsigned int fmt;  // 12
+    long long ts;      // 16
+} VCamXYCaptureAudioData;
+
+static IMP g_origRecvAudioImp = NULL;
+static int s_recvAudioCalls = 0;
+static int s_recvAudioFills = 0;
+static int s_recvAudioCh = 0;
+static double s_recvAudioRate = 0;
+
+static BOOL vcamRateKnown(unsigned int v) {
+    switch (v) {
+        case 8000: case 11025: case 16000: case 22050: case 32000:
+        case 44100: case 48000: case 96000: return YES;
+        default: return NO;
+    }
+}
+
+static void vcamRecvAudioHook(id self, SEL _cmd, void *argPtr) {
+    VCamXYCaptureAudioData *d = (VCamXYCaptureAudioData *)argPtr;
+    if (d && d->data && d->length > 0) {
+        if (s_recvAudioCalls == 0)
+            NSLog(@"[VCam] receiveAudioDataByDevice CALLED len=%d fmt=%u(0x%x) ts=%lld head=%02x%02x%02x%02x",
+                  d->length, d->fmt, d->fmt, d->ts,
+                  ((unsigned char *)d->data)[0], ((unsigned char *)d->data)[1],
+                  ((unsigned char *)d->data)[2], ((unsigned char *)d->data)[3]);
+        s_recvAudioCalls++;
+        if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
+            AudioStreamBasicDescription asbd;
+            memset(&asbd, 0, sizeof(asbd));
+            asbd.mFormatID = kAudioFormatLinearPCM;
+            asbd.mSampleRate = vcamRateKnown(d->fmt) ? (double)d->fmt : 48000.0;
+            asbd.mBitsPerChannel = 16;
+            asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            if (s_recvAudioCh == 0) {
+                double frameSamples = asbd.mSampleRate * 0.02; /* guess 20ms */
+                int guess = d->length > 0 ? (int)(d->length / (frameSamples * 2.0) + 0.5) : 1;
+                if (guess < 1) guess = 1;
+                if (guess > 2) guess = 2;
+                s_recvAudioCh = guess;
+                s_recvAudioRate = asbd.mSampleRate;
+            }
+            asbd.mSampleRate = s_recvAudioRate;
+            asbd.mChannelsPerFrame = s_recvAudioCh;
+            asbd.mFramesPerPacket = 1;
+            asbd.mBytesPerFrame = asbd.mChannelsPerFrame * 2;
+            asbd.mBytesPerPacket = asbd.mBytesPerFrame;
+            if ([[MediaManager sharedManager] fillAudioBuffer:d->data bytes:d->length asbd:&asbd]) {
+                if (s_recvAudioFills == 0)
+                    NSLog(@"[VCam] receiveAudioData fill start ch=%d rate=%.0f len=%d",
+                          s_recvAudioCh, s_recvAudioRate, d->length);
+                s_recvAudioFills++;
+                if (s_recvAudioFills % 300 == 0) vcamBadge(@"R");
+            }
+        }
+    } else if (s_recvAudioCalls == 0) {
+        NSLog(@"[VCam] receiveAudioDataByDevice called with empty struct");
+        s_recvAudioCalls++;
+    }
+    if (g_origRecvAudioImp)
+        ((void (*)(id, SEL, void *))g_origRecvAudioImp)(self, _cmd, argPtr);
+}
+
+// ---- trace only: encoder-level audio methods ----
+static IMP g_origEncodeAudioImp = NULL;
+static int s_encodeAudioCalls = 0;
+static void vcamEncodeAudioHook(id self, SEL _cmd, id arg) {
+    if (s_encodeAudioCalls == 0)
+        NSLog(@"[VCam] encodeAudio: CALLED arg=%@", NSStringFromClass([arg class]));
+    s_encodeAudioCalls++;
+    if (g_origEncodeAudioImp)
+        ((void (*)(id, SEL, id))g_origEncodeAudioImp)(self, _cmd, arg);
+}
+
+static IMP g_origAudioEncFrameImp = NULL;
+static int s_audioEncFrameCalls = 0;
+static void vcamAudioEncFrameHook(id self, SEL _cmd, id enc, id frame) {
+    if (s_audioEncFrameCalls == 0)
+        NSLog(@"[VCam] audioEncoder:audioFrame: CALLED enc=%@ frame=%@",
+              NSStringFromClass([enc class]), NSStringFromClass([frame class]));
+    s_audioEncFrameCalls++;
+    if (g_origAudioEncFrameImp)
+        ((void (*)(id, SEL, id, id))g_origAudioEncFrameImp)(self, _cmd, enc, frame);
 }
 
 static IMP g_origDidAudioImp = NULL;
@@ -521,6 +610,29 @@ static void vcamTryHookPusher(void) {
     g_origDidAudioImp = method_getImplementation(m);
     method_setImplementation(m, (IMP)vcamDidAudioHook);
     NSLog(@"[VCam] XYLiveRtmpPusher audio hook installed");
+
+    // hook receiveAudioDataByDevice: — the real PCM entry (per PUSHER-METHOD dump)
+    Method rm = class_getInstanceMethod(cls, @selector(receiveAudioDataByDevice:));
+    if (rm) {
+        g_origRecvAudioImp = method_getImplementation(rm);
+        method_setImplementation(rm, (IMP)vcamRecvAudioHook);
+        NSLog(@"[VCam] receiveAudioDataByDevice: hook installed types=%s", method_getTypeEncoding(rm));
+    } else {
+        NSLog(@"[VCam] receiveAudioDataByDevice: NOT FOUND");
+    }
+    // trace only: see if encoder-level methods fire during live
+    Method em = class_getInstanceMethod(cls, @selector(encodeAudio:));
+    if (em) {
+        g_origEncodeAudioImp = method_getImplementation(em);
+        method_setImplementation(em, (IMP)vcamEncodeAudioHook);
+        NSLog(@"[VCam] encodeAudio: trace installed");
+    }
+    Method afm = class_getInstanceMethod(cls, @selector(audioEncoder:audioFrame:));
+    if (afm) {
+        g_origAudioEncFrameImp = method_getImplementation(afm);
+        method_setImplementation(afm, (IMP)vcamAudioEncFrameHook);
+        NSLog(@"[VCam] audioEncoder:audioFrame: trace installed");
+    }
 }
 
 static void vcamPollPusher(int attempt) {
