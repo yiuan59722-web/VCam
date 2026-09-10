@@ -5,6 +5,8 @@
 #import "MediaManager.h"
 #import <objc/runtime.h>
 #import <CoreImage/CoreImage.h>
+#import <PhotosUI/PhotosUI.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -72,7 +74,7 @@ static void setupFloatButton() {
         : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
     
     [g_floatButton setTitle:@"📷" forState:UIControlStateNormal];
-    vcamBadge(@"V9");
+    vcamBadge(@"V10");
     g_floatButton.titleLabel.font = [UIFont systemFontOfSize:24];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] 
@@ -164,6 +166,38 @@ static UIViewController *findTopViewController(void) {
 
 @end
 
+@interface VCamPHPickerDelegate : NSObject <PHPickerViewControllerDelegate>
+@end
+
+@implementation VCamPHPickerDelegate
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (results.count == 0) return;
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    if (![provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) return;
+    [provider loadFileRepresentationForTypeIdentifier:(NSString *)kUTTypeMovie completionHandler:^(NSURL *localURL, NSError *error) {
+        if (!localURL) { NSLog(@"[VCam] pick load err %@", error); return; }
+        NSURL *dst = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_input.mp4"]];
+        [[NSFileManager defaultManager] removeItemAtURL:dst error:nil];
+        NSError *cerr = nil;
+        BOOL ok = [[NSFileManager defaultManager] copyItemAtURL:localURL toURL:dst error:&cerr];
+        NSLog(@"[VCam] picked (no-transcode) copied=%d", ok);
+        if (!ok) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[MediaManager sharedManager] loadMediaFromURL:dst];
+            g_vcamEnabled = YES;
+            [[MediaManager sharedManager] start];
+            vcamBadge(@"▶");
+            if (g_floatButton) {
+                g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
+            }
+        });
+    }];
+}
+@end
+
+static VCamPHPickerDelegate *g_phpDelegate = nil;
+
 static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
 
 static void handleTapGesture(UITapGestureRecognizer *gesture) {
@@ -178,13 +212,12 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
     [alert addAction:[UIAlertAction actionWithTitle:@"选择视频" 
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         
-        if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeSavedPhotosAlbum]) {
-            return;
-        }
-        UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-        picker.sourceType = UIImagePickerControllerSourceTypeSavedPhotosAlbum;
-        picker.mediaTypes = @[@"public.movie"];
-        picker.delegate = g_pickerDelegate;
+        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+        config.filter = [PHPickerFilter videos];
+        config.selectionLimit = 1;
+        PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
+        if (!g_phpDelegate) g_phpDelegate = [[VCamPHPickerDelegate alloc] init];
+        picker.delegate = g_phpDelegate;
         [topVC presentViewController:picker animated:YES completion:nil];
     }]];
     
@@ -225,19 +258,34 @@ static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBu
     if (v) origImp = (IMP)v.pointerValue;
     void (*orig)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) = (void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp;
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
-        CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
-        CVPixelBufferRef target = CMSampleBufferGetImageBuffer(sampleBuffer);
-        if (fakeFrame && target) {
-            CVPixelBufferRef srcPB = (CVPixelBufferRef)CMSampleBufferGetImageBuffer(fakeFrame);
-            if (srcPB) {
-                if (!g_vcamCIContext) g_vcamCIContext = [[CIContext alloc] init];
-                CIImage *img = [CIImage imageWithCVPixelBuffer:srcPB];
-                [g_vcamCIContext render:img toCVPixelBuffer:target];
-                g_vcamCount++;
-                if (g_vcamCount % 60 == 1) vcamBadge(@"P✓");
+        CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sampleBuffer);
+        FourCharCode mt = fmt ? CMFormatDescriptionGetMediaType(fmt) : 0;
+        if (mt == kCMMediaType_Video) {
+            CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
+            CVPixelBufferRef target = CMSampleBufferGetImageBuffer(sampleBuffer);
+            if (fakeFrame && target) {
+                CVPixelBufferRef srcPB = (CVPixelBufferRef)CMSampleBufferGetImageBuffer(fakeFrame);
+                if (srcPB) {
+                    if (!g_vcamCIContext) g_vcamCIContext = [[CIContext alloc] init];
+                    CIImage *img = [CIImage imageWithCVPixelBuffer:srcPB];
+                    [g_vcamCIContext render:img toCVPixelBuffer:target];
+                    g_vcamCount++;
+                    if (g_vcamCount % 60 == 1) vcamBadge(@"P");
+                }
+            }
+            if (fakeFrame) CFRelease(fakeFrame);
+        } else if (mt == kCMMediaType_Audio) {
+            CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sampleBuffer);
+            CMAudioFormatDescriptionRef afmt = (CMAudioFormatDescriptionRef)fmt;
+            const AudioStreamBasicDescription *asbd = afmt ? CMAudioFormatDescriptionGetStreamBasicDescription(afmt) : NULL;
+            size_t alen = 0; char *aptr = NULL;
+            if (bb && asbd && CMBlockBufferGetDataPointer(bb, 0, NULL, &alen, &aptr) == kCMBlockBufferNoErr && aptr && alen) {
+                if ([[MediaManager sharedManager] fillAudioBuffer:aptr bytes:alen asbd:asbd]) {
+                    g_vcamCount++;
+                    if (g_vcamCount % 240 == 0) vcamBadge(@"A");
+                }
             }
         }
-        if (fakeFrame) CFRelease(fakeFrame);
     }
     if (orig) orig(self, _cmd, output, sampleBuffer, connection);
 }
@@ -357,6 +405,24 @@ static void vcamFinishHook(id self, SEL _cmd, AVCaptureFileOutput *output, NSURL
 - (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
     NSLog(@"[VCam] PhotoOutput shot");
     vcamBadge(@"P✓");
+    %orig;
+}
+%end
+
+%hook AVCaptureAudioDataOutput
+- (void)setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && g_origFrameImps) {
+        Class cls = [delegate class];
+        NSString *key = NSStringFromClass(cls);
+        if (!g_origFrameImps[key]) {
+            Method m = class_getInstanceMethod(cls, @selector(captureOutput:didOutputSampleBuffer:fromConnection:));
+            if (m) {
+                IMP origImp = method_setImplementation(m, (IMP)vcamFrameHook);
+                g_origFrameImps[key] = [NSValue valueWithPointer:(void *)origImp];
+                NSLog(@"[VCam] swizzled audio frames on %@", key);
+            }
+        }
+    }
     %orig;
 }
 %end
