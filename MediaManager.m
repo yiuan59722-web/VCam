@@ -5,6 +5,9 @@
 @property (nonatomic, strong) dispatch_queue_t decodeQueue;
 @property (nonatomic, assign) CMTime startTime;
 @property (nonatomic, assign) int64_t frameIndex;
+@property (nonatomic, strong) NSMutableData *audioLeftover;
+@property (nonatomic, assign) AudioStreamBasicDescription targetASBD;
+@property (nonatomic, assign) BOOL audioFormatConfigured;
 @end
 
 @implementation MediaManager
@@ -28,6 +31,7 @@
         _decodeQueue = dispatch_queue_create("com.vcam.decode", DISPATCH_QUEUE_SERIAL);
         _startTime = kCMTimeZero;
         _frameIndex = 0;
+        _audioLeftover = [NSMutableData data];
     }
     return self;
 }
@@ -82,28 +86,7 @@
         [self.videoReader startReading];
     }
     
-    // --- Audio Reader ---
-    if (self.currentAsset) {
-        self.audioReader = [AVAssetReader assetReaderWithAsset:self.currentAsset error:&error];
-        
-        NSArray<AVAssetTrack *> *audioTracks = [self.currentAsset tracksWithMediaType:AVMediaTypeAudio];
-        if (audioTracks.count > 0) {
-            NSDictionary *settings = @{
-                AVFormatIDKey: @(kAudioFormatLinearPCM),
-                AVSampleRateKey: @(44100),
-                AVNumberOfChannelsKey: @(1),
-                AVLinearPCMBitDepthKey: @(16),
-                AVLinearPCMIsFloatKey: @(NO),
-                AVLinearPCMIsBigEndianKey: @(NO),
-            };
-            self.audioOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:audioTracks.firstObject
-                                                                          outputSettings:settings];
-            self.audioOutput.alwaysCopiesSampleData = NO;
-            [self.audioReader addOutput:self.audioOutput];
-        }
-        
-        [self.audioReader startReading];
-    }
+    [self resetAudioReader];
 }
 
 #pragma mark - Frame Generation
@@ -208,6 +191,77 @@
     CVPixelBufferRelease(pixelBuffer);
     
     return sampleBuffer;
+}
+
+- (void)resetAudioReader {
+    if (!self.currentAsset) return;
+    @synchronized (self) {
+        NSArray<AVAssetTrack *> *audioTracks = [self.currentAsset tracksWithMediaType:AVMediaTypeAudio];
+        if (audioTracks.count == 0) return;
+        NSError *error = nil;
+        self.audioReader = [AVAssetReader assetReaderWithAsset:self.currentAsset error:&error];
+        double rate = _audioFormatConfigured ? _targetASBD.mSampleRate : 44100;
+        int ch = _audioFormatConfigured ? _targetASBD.mChannelsPerFrame : 1;
+        BOOL isFloat = _audioFormatConfigured ? (_targetASBD.mFormatFlags & kAudioFormatFlagIsFloat) != 0 : NO;
+        int bits = isFloat ? 32 : (_audioFormatConfigured ? (_targetASBD.mBitsPerChannel <= 16 ? 16 : (_targetASBD.mBitsPerChannel <= 24 ? 24 : 32)) : 16);
+        NSDictionary *settings = @{
+            AVFormatIDKey: @(kAudioFormatLinearPCM),
+            AVSampleRateKey: @(rate),
+            AVNumberOfChannelsKey: @(ch),
+            AVLinearPCMBitDepthKey: @(bits),
+            AVLinearPCMIsFloatKey: @(isFloat),
+            AVLinearPCMIsBigEndianKey: @(NO),
+        };
+        self.audioOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:audioTracks.firstObject
+                                                                      outputSettings:settings];
+        self.audioOutput.alwaysCopiesSampleData = NO;
+        [self.audioReader addOutput:self.audioOutput];
+        [self.audioReader startReading];
+    }
+}
+
+- (BOOL)fillAudioBuffer:(void *)dst bytes:(size_t)bytes asbd:(const AudioStreamBasicDescription *)asbd {
+    if (!dst || bytes == 0) return NO;
+    @synchronized (self) {
+        if (asbd && asbd->mFormatID == kAudioFormatLinearPCM) {
+            if (!_audioFormatConfigured || memcmp(&_targetASBD, asbd, sizeof(AudioStreamBasicDescription)) != 0) {
+                _targetASBD = *asbd;
+                _audioFormatConfigured = YES;
+                [self.audioLeftover setLength:0];
+                [self resetAudioReader];
+            }
+        }
+        int attempts = 0;
+        while (self.audioLeftover.length < bytes && attempts < 8) {
+            attempts++;
+            CMSampleBufferRef sb = [self nextAudioFrame];
+            if (!sb) {
+                if (self.loopPlayback && self.currentAsset) {
+                    [self resetAudioReader];
+                    continue;
+                }
+                break;
+            }
+            CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sb);
+            if (bb) {
+                size_t len = 0; char *ptr = NULL;
+                if (CMBlockBufferGetDataPointer(bb, 0, NULL, &len, &ptr) == kCMBlockBufferNoErr && ptr && len) {
+                    [self.audioLeftover appendBytes:ptr length:len];
+                }
+            }
+            CFRelease(sb);
+        }
+        size_t have = self.audioLeftover.length;
+        if (have >= bytes) {
+            memcpy(dst, self.audioLeftover.bytes, bytes);
+            [self.audioLeftover replaceBytesInRange:NSMakeRange(0, bytes) withBytes:NULL length:0];
+            return YES;
+        }
+        if (have) memcpy(dst, self.audioLeftover.bytes, have);
+        memset((char *)dst + have, 0, bytes - have);
+        [self.audioLeftover setLength:0];
+        return have > 0;
+    }
 }
 
 #pragma mark - Lifecycle
