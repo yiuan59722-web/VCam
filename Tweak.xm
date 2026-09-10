@@ -177,6 +177,9 @@ static void vcamStartPlayback(id avAsset) {
 }
 
 static void vcamRequestDirect(NSString *assetId, int attempt) {
+    // background queue: requestAVAssetForVideo can block synchronously on main
+    // (limited photo access + huge local video) and freeze the entire app
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
     Class phAssetCls = NSClassFromString(@"PHAsset");
     id fetch = ((id (*)(id, SEL, NSArray *, id))objc_msgSend)(phAssetCls, sel_registerName("fetchAssetsWithLocalIdentifiers:options:"), @[assetId], nil);
     NSUInteger cnt = ((NSUInteger (*)(id, SEL))objc_msgSend)(fetch, sel_registerName("count"));
@@ -184,7 +187,7 @@ static void vcamRequestDirect(NSString *assetId, int attempt) {
         if (attempt < 6) {
             NSLog(@"[VCam] fetch empty attempt=%d, retry", attempt);
             vcamBadge(@"WAIT");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 vcamRequestDirect(assetId, attempt + 1);
             });
             return;
@@ -204,6 +207,13 @@ static void vcamRequestDirect(NSString *assetId, int attempt) {
                 vcamBadge([NSString stringWithFormat:@"DL%d", (int)(progress * 100)]);
             });
     }
+    __block BOOL delivered = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!delivered) {
+            NSLog(@"[VCam] PHAsset request silent for 45s (big file preparing?)");
+            vcamBadge(@"大文件准备中");
+        }
+    });
     id imgMgr = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHImageManager"), sel_registerName("defaultManager"));
     ((void (*)(id, SEL, id, id, void (^)(id, id, NSDictionary *)))objc_msgSend)(
         imgMgr, sel_registerName("requestAVAssetForVideo:options:completionHandler:"), phAsset, opts,
@@ -212,12 +222,14 @@ static void vcamRequestDirect(NSString *assetId, int attempt) {
                   avAsset ? NSStringFromClass([avAsset class]) : @"nil",
                   info[@"PHImageResultIsInCloudKey"] ? @"YES" : @"no",
                   info[@"PHImageErrorKey"]);
+            delivered = YES;
             if (!avAsset) { vcamBadge(@"读取失败"); return; }
             vcamBadge(@"GOT");
             vcamStartPlayback(avAsset);
         });
     NSLog(@"[VCam] using PHAsset direct read attempt=%d (NO copy, ever)", attempt);
     vcamBadge(@"直读中");
+    });
 }
 
 @protocol VCamPHPickerShim <NSObject>
