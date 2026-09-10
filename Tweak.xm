@@ -583,6 +583,84 @@ static void vcamDidAudioHook(id self, SEL _cmd, id audioArg) {
         ((void (*)(id, SEL, id))g_origDidAudioImp)(self, _cmd, audioArg);
 }
 
+// ===== XYHardwareAudioEncoder: real live encoder entry (RECON hits: encodeBufferByBytes:dataLen:timeStamp:) =====
+static IMP g_origEncBytesImp = NULL;
+static int s_encBytesCalls = 0;
+static int s_encBytesFills = 0;
+static double s_encRate = 0;
+
+static double vcamCloserRate(double v) {
+    double d48 = v > 48000.0 ? v - 48000.0 : 48000.0 - v;
+    double d44 = v > 44100.0 ? v - 44100.0 : 44100.0 - v;
+    return d48 <= d44 ? 48000.0 : 44100.0;
+}
+
+static void vcamEncBytesHook(id self, SEL _cmd, void *bytes, long long dataLen, long long ts) {
+    if (bytes && dataLen > 0) {
+        if (s_encBytesCalls == 0) {
+            NSLog(@"[VCam] encodeBufferByBytes CALLED len=%lld ts=%lld head=%02x%02x%02x%02x",
+                  dataLen, ts,
+                  ((unsigned char *)bytes)[0], ((unsigned char *)bytes)[1],
+                  ((unsigned char *)bytes)[2], ((unsigned char *)bytes)[3]);
+            // infer capture sample rate from buffer length (mono 16bit PCM)
+            double v10 = (double)dataLen * 50.0;   /* 10ms frame  */
+            double v20 = (double)dataLen * 25.0;   /* 20ms frame  */
+            double r10 = vcamCloserRate(v10), r20 = vcamCloserRate(v20);
+            double d10 = v10 > r10 ? v10 - r10 : r10 - v10;
+            double d20 = v20 > r20 ? v20 - r20 : r20 - v20;
+            s_encRate = (d10 <= d20) ? r10 : r20;
+            NSLog(@"[VCam] encodeBufferByBytes inferred rate=%.0f (10ms=%.0f 20ms=%.0f)", s_encRate, v10, v20);
+        }
+        s_encBytesCalls++;
+        if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
+            AudioStreamBasicDescription asbd;
+            memset(&asbd, 0, sizeof(asbd));
+            asbd.mFormatID = kAudioFormatLinearPCM;
+            asbd.mSampleRate = s_encRate > 0 ? s_encRate : 48000.0;
+            asbd.mChannelsPerFrame = 1;
+            asbd.mBitsPerChannel = 16;
+            asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            asbd.mFramesPerPacket = 1;
+            asbd.mBytesPerFrame = 2;
+            asbd.mBytesPerPacket = 2;
+            if ([[MediaManager sharedManager] fillAudioBuffer:bytes bytes:(size_t)dataLen asbd:&asbd]) {
+                if (s_encBytesFills == 0)
+                    NSLog(@"[VCam] encodeBufferByBytes fill start len=%lld rate=%.0f", dataLen, asbd.mSampleRate);
+                s_encBytesFills++;
+                if (s_encBytesFills % 300 == 0) vcamBadge(@"E");
+            }
+        }
+    } else if (s_encBytesCalls == 0) {
+        NSLog(@"[VCam] encodeBufferByBytes called with empty args");
+        s_encBytesCalls++;
+    }
+    if (g_origEncBytesImp)
+        ((void (*)(id, SEL, void *, long long, long long))g_origEncBytesImp)(self, _cmd, bytes, dataLen, ts);
+}
+
+static void vcamTryHookEncoder(void) {
+    static BOOL s_hooked = NO;
+    if (s_hooked) return;
+    Class cls = NSClassFromString(@"XYHardwareAudioEncoder");
+    if (!cls) return;
+    s_hooked = YES;
+    unsigned int mc = 0;
+    Method *ms = class_copyMethodList(cls, &mc);
+    for (unsigned int j = 0; j < mc; j++)
+        NSLog(@"[VCam] ENC-METHOD %@ %@", NSStringFromSelector(method_getName(ms[j])),
+              [NSString stringWithUTF8String:method_getTypeEncoding(ms[j])]);
+    free(ms);
+    Method m = class_getInstanceMethod(cls, @selector(encodeBufferByBytes:dataLen:timeStamp:));
+    if (m) {
+        NSLog(@"[VCam] encodeBufferByBytes types=%s", method_getTypeEncoding(m));
+        g_origEncBytesImp = method_getImplementation(m);
+        method_setImplementation(m, (IMP)vcamEncBytesHook);
+        NSLog(@"[VCam] XYHardwareAudioEncoder hook installed");
+    } else {
+        NSLog(@"[VCam] encodeBufferByBytes:dataLen:timeStamp: NOT FOUND");
+    }
+}
+
 static void vcamTryHookPusher(void) {
     static BOOL s_hooked = NO;
     if (s_hooked) return;
@@ -637,6 +715,7 @@ static void vcamTryHookPusher(void) {
 
 static void vcamPollPusher(int attempt) {
     vcamTryHookPusher();
+    vcamTryHookEncoder();
     if (attempt > 120) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         vcamPollPusher(attempt + 1);
