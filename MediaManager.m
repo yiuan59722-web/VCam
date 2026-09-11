@@ -179,8 +179,9 @@
         // 3) frame is ahead of the clock -> hold it for re-emission
         CMTime spts = CMSampleBufferGetPresentationTimeStamp(sample);
         if (CMTimeCompare(spts, target) > 0) {
-            _heldFrame = sample;   // ownership transferred
+            _heldFrame = sample;
             _heldPTS = spts;
+            CFRetain(sample);   // held keeps its own +1; local release below must not free it
         }
         
         // 4) re-timestamp to wall clock so AVCapture consumers see continuous PTS
