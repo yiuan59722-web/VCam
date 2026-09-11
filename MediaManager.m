@@ -149,7 +149,7 @@
         // 2) skip frames until we reach the wall-clock target
         CMSampleBufferRef sample = NULL;
         int guard = 0;
-        while (guard++ < 300) {
+        while (guard++ < 120) {
             @try {
                 sample = [self.videoOutput copyNextSampleBuffer];
             } @catch (NSException *e) {
@@ -307,33 +307,17 @@
                 [self resetAudioReader];
             }
         }
-        // audio/video start alignment: drop source audio before the wall-clock play point
+        // audio/video start alignment: if the wall clock is already far past the
+        // load point (user picked the video a while ago), re-anchor the clock instead
+        // of decoding/skipping audio here — this runs on the audio RT thread and must
+        // stay cheap (watchdog kills the app otherwise).
         if (!_audioSyncDone) {
             _audioSyncDone = YES;
             if (_playStartWall > 0 && _audioFormatConfigured) {
                 double elapsed = CACurrentMediaTime() - _playStartWall;
-                if (elapsed > 0.5) {
-                    size_t skipBytes = (size_t)(elapsed * _targetASBD.mSampleRate * _targetASBD.mChannelsPerFrame * (_targetASBD.mBitsPerChannel / 8));
-                    int fa = 0;
-                    while (self.audioLeftover.length < skipBytes && fa++ < 3000) {
-                        CMSampleBufferRef sb = [self nextAudioFrame];
-                        if (!sb) {
-                            if (self.loopPlayback && self.currentAsset) { [self resetAudioReader]; continue; }
-                            break;
-                        }
-                        CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sb);
-                        if (bb) {
-                            size_t len = 0; char *ptr = NULL;
-                            if (CMBlockBufferGetDataPointer(bb, 0, NULL, &len, &ptr) == kCMBlockBufferNoErr && ptr && len)
-                                [self.audioLeftover appendBytes:ptr length:len];
-                        }
-                        CFRelease(sb);
-                    }
-                    if (self.audioLeftover.length > skipBytes)
-                        [self.audioLeftover replaceBytesInRange:NSMakeRange(0, skipBytes) withBytes:NULL length:0];
-                    else
-                        [self.audioLeftover setLength:0];
-                    NSLog(@"[VCam] audio sync skip %.1fs (%zu bytes)", elapsed, skipBytes);
+                if (elapsed > 0.3) {
+                    _playStartWall = CACurrentMediaTime();
+                    NSLog(@"[VCam] audio sync re-anchor (was %.1fs behind)", elapsed);
                 }
             }
         }
