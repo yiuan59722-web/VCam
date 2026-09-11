@@ -320,7 +320,17 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         if (!cfgCls || !pickCls) { vcamBadge(@"NO-PICK"); return; }
         id config = [[cfgCls alloc] init];
         [config setValue:@1 forKey:@"selectionLimit"];
-        id filter = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHPickerFilter"), sel_registerName("videos"));
+        Class pfCls = NSClassFromString(@"PHPickerFilter");
+        id filter = nil;
+        if (pfCls) {
+            SEL v17 = sel_registerName("videos");        // iOS 17+
+            SEL v16 = sel_registerName("videosFilter");  // iOS 14-16
+            if ([pfCls respondsToSelector:v17]) {
+                filter = ((id (*)(id, SEL))objc_msgSend)(pfCls, v17);
+            } else if ([pfCls respondsToSelector:v16]) {
+                filter = ((id (*)(id, SEL))objc_msgSend)(pfCls, v16);
+            }
+        }
         if (filter) [config setValue:filter forKey:@"filter"];
         id phLib = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"PHPhotoLibrary"), sel_registerName("sharedPhotoLibrary"));
         if (phLib) [config setValue:phLib forKey:@"photoLibrary"];
