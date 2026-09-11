@@ -9,6 +9,7 @@ static void vcamAudioRecon(void);
 #import <CoreImage/CoreImage.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
+#import "fishhook.h"
 
 // ============================================================================
 // MARK: - 全局状态
@@ -661,6 +662,104 @@ static void vcamTryHookEncoder(void) {
     }
 }
 
+// ===== AudioUnit root interception (fishhook C functions) =====
+static OSStatus (*g_origAudioUnitRender)(AudioUnit, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32, AudioBufferList *);
+static OSStatus (*g_origAudioUnitSetProperty)(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement, const void *, UInt32);
+
+static double s_auInputRate = 0;
+static int s_auInputCh = 0;
+static int s_auRenderCalls = 0;
+static int s_auRenderFills = 0;
+
+static OSStatus vcamAudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID inID, AudioUnitScope inScope,
+                                         AudioUnitElement inElement, const void *inData, UInt32 inDataSize) {
+    if (inID == kAudioUnitProperty_StreamFormat && inData && inDataSize >= sizeof(AudioStreamBasicDescription)) {
+        const AudioStreamBasicDescription *asbd = (const AudioStreamBasicDescription *)inData;
+        if (asbd->mFormatID == kAudioFormatLinearPCM && inScope == kAudioUnitScope_Input) {
+            s_auInputRate = asbd->mSampleRate;
+            s_auInputCh = asbd->mChannelsPerFrame;
+            NSLog(@"[VCam] AU SetProperty StreamFormat INPUT rate=%.0f ch=%d bits=%u float=%d",
+                  asbd->mSampleRate, (int)asbd->mChannelsPerFrame, (unsigned)asbd->mBitsPerChannel,
+                  (int)((asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0));
+        }
+    }
+    return g_origAudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+}
+
+static OSStatus vcamAudioUnitRender(AudioUnit inUnit, AudioUnitRenderActionFlags *ioActionFlags,
+                                    const AudioTimeStamp *inTimeStamp, UInt32 inOutputBusNumber,
+                                    UInt32 inNumberFrames, AudioBufferList *ioData) {
+    OSStatus ret = g_origAudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
+    if (s_auRenderCalls == 0)
+        NSLog(@"[VCam] AudioUnitRender CALLED frames=%u bufs=%u rate=%.0f ch=%d",
+              (unsigned)inNumberFrames, ioData ? (unsigned)ioData->mNumberBuffers : 0, s_auInputRate, s_auInputCh);
+    s_auRenderCalls++;
+    if (ret == noErr && ioData && g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
+        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
+            AudioBuffer *b = &ioData->mBuffers[i];
+            if (!b->mData || !b->mDataByteSize) continue;
+            AudioStreamBasicDescription asbd;
+            memset(&asbd, 0, sizeof(asbd));
+            asbd.mFormatID = kAudioFormatLinearPCM;
+            asbd.mSampleRate = s_auInputRate > 0 ? s_auInputRate : 48000.0;
+            asbd.mChannelsPerFrame = b->mNumberChannels ? (UInt32)b->mNumberChannels : (s_auInputCh > 0 ? (UInt32)s_auInputCh : 1);
+            asbd.mBitsPerChannel = 16;
+            asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            asbd.mFramesPerPacket = 1;
+            asbd.mBytesPerFrame = asbd.mChannelsPerFrame * 2;
+            asbd.mBytesPerPacket = asbd.mBytesPerFrame;
+            if ([[MediaManager sharedManager] fillAudioBuffer:b->mData bytes:b->mDataByteSize asbd:&asbd]) {
+                if (s_auRenderFills == 0)
+                    NSLog(@"[VCam] AudioUnitRender fill start ch=%u bytes=%u rate=%.0f",
+                          (unsigned)asbd.mChannelsPerFrame, (unsigned)b->mDataByteSize, asbd.mSampleRate);
+                s_auRenderFills++;
+                if (s_auRenderFills % 300 == 0) vcamBadge(@"U");
+            }
+        }
+    }
+    return ret;
+}
+
+static void vcamInstallAudioUnitHook(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    rebind_symbols((struct rebinding[]){
+        {"AudioUnitRender", (void *)vcamAudioUnitRender, (void **)&g_origAudioUnitRender},
+        {"AudioUnitSetProperty", (void *)vcamAudioUnitSetProperty, (void **)&g_origAudioUnitSetProperty},
+    }, 2);
+    NSLog(@"[VCam] AudioUnit fishhooks installed");
+}
+
+// ===== AVVoiceController probe (AVFAudio private) =====
+static IMP g_origVVCStartRecord = NULL;
+static int s_vvcCalls = 0;
+static void vcamVVCStartRecord(id self, SEL _cmd, id settings, id completion, id alertCompletion, id audioCallback) {
+    if (s_vvcCalls == 0)
+        NSLog(@"[VCam] AVVoiceController startRecordWithSettings CALLED settings=%@ cb=%@",
+              settings, audioCallback ? NSStringFromClass([audioCallback class]) : @"nil");
+    s_vvcCalls++;
+    if (g_origVVCStartRecord)
+        ((void (*)(id, SEL, id, id, id, id))g_origVVCStartRecord)(self, _cmd, settings, completion, alertCompletion, audioCallback);
+}
+
+static void vcamTryHookVVC(void) {
+    static BOOL done = NO;
+    if (done) return;
+    Class cls = NSClassFromString(@"AVVoiceController");
+    if (!cls) return;
+    done = YES;
+    Method m = class_getInstanceMethod(cls, @selector(startRecordWithSettings:completion:alertCompletion:audioCallback:));
+    if (m) {
+        NSLog(@"[VCam] AVVoiceController startRecord types=%s", method_getTypeEncoding(m));
+        g_origVVCStartRecord = method_getImplementation(m);
+        method_setImplementation(m, (IMP)vcamVVCStartRecord);
+        NSLog(@"[VCam] AVVoiceController probe installed");
+    } else {
+        NSLog(@"[VCam] AVVoiceController startRecordWithSettings NOT FOUND");
+    }
+}
+
 static void vcamTryHookPusher(void) {
     static BOOL s_hooked = NO;
     if (s_hooked) return;
@@ -716,6 +815,8 @@ static void vcamTryHookPusher(void) {
 static void vcamPollPusher(int attempt) {
     vcamTryHookPusher();
     vcamTryHookEncoder();
+    vcamTryHookVVC();
+    vcamInstallAudioUnitHook();
     if (attempt > 120) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         vcamPollPusher(attempt + 1);
