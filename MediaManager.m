@@ -8,6 +8,10 @@
 @property (nonatomic, strong) NSMutableData *audioLeftover;
 @property (nonatomic, assign) AudioStreamBasicDescription targetASBD;
 @property (nonatomic, assign) BOOL audioFormatConfigured;
+@property (nonatomic, assign) NSTimeInterval playStartWall;
+@property (nonatomic, assign) BOOL audioSyncDone;
+@property (nonatomic, assign) CMSampleBufferRef heldFrame;
+@property (nonatomic, assign) CMTime heldPTS;
 @end
 
 @implementation MediaManager
@@ -33,6 +37,10 @@
         _startTime = kCMTimeZero;
         _frameIndex = 0;
         _audioLeftover = [NSMutableData data];
+        _playStartWall = 0;
+        _audioSyncDone = NO;
+        _heldFrame = NULL;
+        _heldPTS = kCMTimeZero;
     }
     return self;
 }
@@ -75,31 +83,39 @@
         
         [self resetReaders];
         self.mode = VCamModeVideo;
+        @synchronized (self) {
+            _playStartWall = CACurrentMediaTime();
+            _audioSyncDone = NO;
+            if (_heldFrame) { CFRelease(_heldFrame); _heldFrame = NULL; }
+        }
+        NSLog(@"[VCam] playback clock reset (wall sync)");
     });
 }
 
 - (void)resetReaders {
-    NSError *error = nil;
-    
-    // --- Video Reader ---
-    if (self.currentAsset) {
-        self.videoReader = [AVAssetReader assetReaderWithAsset:self.currentAsset error:&error];
+    @synchronized (self) {
+        NSError *error = nil;
         
-        NSArray<AVAssetTrack *> *videoTracks = [self.currentAsset tracksWithMediaType:AVMediaTypeVideo];
-        if (videoTracks.count > 0) {
-            NSDictionary *settings = @{
-                (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
-            };
-            self.videoOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTracks.firstObject
-                                                                          outputSettings:settings];
-            self.videoOutput.alwaysCopiesSampleData = YES;
-            [self.videoReader addOutput:self.videoOutput];
+        // --- Video Reader ---
+        if (self.currentAsset) {
+            self.videoReader = [AVAssetReader assetReaderWithAsset:self.currentAsset error:&error];
+            
+            NSArray<AVAssetTrack *> *videoTracks = [self.currentAsset tracksWithMediaType:AVMediaTypeVideo];
+            if (videoTracks.count > 0) {
+                NSDictionary *settings = @{
+                    (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+                };
+                self.videoOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTracks.firstObject
+                                                                              outputSettings:settings];
+                self.videoOutput.alwaysCopiesSampleData = YES;
+                [self.videoReader addOutput:self.videoOutput];
+            }
+            
+            [self.videoReader startReading];
         }
         
-        [self.videoReader startReading];
+        [self resetAudioReader];
     }
-    
-    [self resetAudioReader];
 }
 
 #pragma mark - Frame Generation
@@ -110,42 +126,88 @@
         return [self generateBlackFrameWithSize:self.videoSize presentationTime:pts];
     }
     
-    CMSampleBufferRef sample = [self.videoOutput copyNextSampleBuffer];
-    
-    // Handle end-of-stream: loop
-    if (!sample) {
-        if (self.loopPlayback) {
-            [self resetReaders];
-            sample = [self.videoOutput copyNextSampleBuffer];
+    @synchronized (self) {
+        if (_playStartWall <= 0) _playStartWall = CACurrentMediaTime();
+        NSTimeInterval elapsed = CACurrentMediaTime() - _playStartWall;
+        if (elapsed < 0) elapsed = 0;
+        CMTime target = CMTimeMakeWithSeconds(elapsed, 600);
+        
+        // 1) wall clock hasn't reached the held frame yet -> re-emit it
+        if (_heldFrame) {
+            if (CMTimeCompare(_heldPTS, target) > 0) {
+                CMSampleBufferRef copy = NULL;
+                CMSampleBufferCreateCopy(kCFAllocatorDefault, _heldFrame, &copy);
+                if (copy) {
+                    CMSampleBufferSetOutputPresentationTimeStamp(copy, CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000));
+                    return copy;
+                }
+            }
+            CFRelease(_heldFrame);
+            _heldFrame = NULL;
         }
+        
+        // 2) skip frames until we reach the wall-clock target
+        CMSampleBufferRef sample = NULL;
+        int guard = 0;
+        while (guard++ < 300) {
+            @try {
+                sample = [self.videoOutput copyNextSampleBuffer];
+            } @catch (NSException *e) {
+                NSLog(@"[VCam] video copyNext exception: %@", e.reason);
+                sample = NULL;
+            }
+            if (!sample) {
+                if (self.loopPlayback) {
+                    [self resetReaders];
+                    _playStartWall = CACurrentMediaTime();
+                    target = CMTimeMakeWithSeconds(0, 600);
+                    continue;
+                }
+                break;
+            }
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+            if (CMTimeCompare(pts, target) >= 0) break;
+            CFRelease(sample);
+            sample = NULL;
+        }
+        
         if (!sample) {
             CMTime pts = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000);
             return [self generateBlackFrameWithSize:self.videoSize presentationTime:pts];
         }
+        
+        // 3) frame is ahead of the clock -> hold it for re-emission
+        CMTime spts = CMSampleBufferGetPresentationTimeStamp(sample);
+        if (CMTimeCompare(spts, target) > 0) {
+            _heldFrame = sample;   // ownership transferred
+            _heldPTS = spts;
+        }
+        
+        // 4) re-timestamp to wall clock so AVCapture consumers see continuous PTS
+        CMSampleBufferRef copy = NULL;
+        CMSampleBufferCreateCopy(kCFAllocatorDefault, sample, &copy);
+        if (copy) {
+            CMSampleBufferSetOutputPresentationTimeStamp(copy, CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000));
+        }
+        CFRelease(sample);
+        return copy;
     }
-    
-    // Re-timestamp to wall clock so AVCapture consumers see continuous PTS
-    CMTime now = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000);
-    CMSampleBufferRef retimed = NULL;
-    CMSampleBufferRef copy = NULL;
-    
-    CMSampleBufferCreateCopy(kCFAllocatorDefault, sample, &copy);
-    if (copy) {
-        CMSampleBufferSetOutputPresentationTimeStamp(copy, now);
-        retimed = copy;
-    }
-    CFRelease(sample);
-    
-    return retimed;
 }
 
 - (CMSampleBufferRef)nextAudioFrame {
     if (!self.audioOutput) return NULL;
     
-    CMSampleBufferRef sample = [self.audioOutput copyNextSampleBuffer];
-    if (!sample && self.loopPlayback) {
-        // Audio reader reset handled separately if needed
-        return NULL;
+    CMSampleBufferRef sample = NULL;
+    @try {
+        sample = [self.audioOutput copyNextSampleBuffer];
+    } @catch (NSException *e) {
+        NSLog(@"[VCam] audio copyNext exception: %@", e.reason);
+        sample = NULL;
+    }
+    if (sample && self.audioReader.status == AVAssetReaderStatusFailed) {
+        NSLog(@"[VCam] audio reader FAILED: %@", self.audioReader.error);
+        CFRelease(sample);
+        sample = NULL;
     }
     return sample;
 }
@@ -241,7 +303,38 @@
                 _targetASBD = *asbd;
                 _audioFormatConfigured = YES;
                 [self.audioLeftover setLength:0];
+                _audioSyncDone = NO;
                 [self resetAudioReader];
+            }
+        }
+        // audio/video start alignment: drop source audio before the wall-clock play point
+        if (!_audioSyncDone) {
+            _audioSyncDone = YES;
+            if (_playStartWall > 0 && _audioFormatConfigured) {
+                double elapsed = CACurrentMediaTime() - _playStartWall;
+                if (elapsed > 0.5) {
+                    size_t skipBytes = (size_t)(elapsed * _targetASBD.mSampleRate * _targetASBD.mChannelsPerFrame * (_targetASBD.mBitsPerChannel / 8));
+                    int fa = 0;
+                    while (self.audioLeftover.length < skipBytes && fa++ < 3000) {
+                        CMSampleBufferRef sb = [self nextAudioFrame];
+                        if (!sb) {
+                            if (self.loopPlayback && self.currentAsset) { [self resetAudioReader]; continue; }
+                            break;
+                        }
+                        CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sb);
+                        if (bb) {
+                            size_t len = 0; char *ptr = NULL;
+                            if (CMBlockBufferGetDataPointer(bb, 0, NULL, &len, &ptr) == kCMBlockBufferNoErr && ptr && len)
+                                [self.audioLeftover appendBytes:ptr length:len];
+                        }
+                        CFRelease(sb);
+                    }
+                    if (self.audioLeftover.length > skipBytes)
+                        [self.audioLeftover replaceBytesInRange:NSMakeRange(0, skipBytes) withBytes:NULL length:0];
+                    else
+                        [self.audioLeftover setLength:0];
+                    NSLog(@"[VCam] audio sync skip %.1fs (%zu bytes)", elapsed, skipBytes);
+                }
             }
         }
         int attempts = 0;
