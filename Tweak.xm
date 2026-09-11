@@ -370,6 +370,10 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 // ============================================================================
 
 static CIContext *g_vcamCIContext = nil;
+static CGAffineTransform g_paintTransform = CGAffineTransformIdentity;
+static CGSize g_paintSrc = {0, 0};
+static CGSize g_paintDst = {0, 0};
+static CGColorSpaceRef g_paintColorSpace = NULL;
 
 static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
     IMP origImp = NULL;
@@ -394,24 +398,35 @@ static void vcamFrameHook(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBu
             if (fakeFrame && target) {
                 CVPixelBufferRef srcPB = (CVPixelBufferRef)CMSampleBufferGetImageBuffer(fakeFrame);
                 if (srcPB) {
-                    if (!g_vcamCIContext) g_vcamCIContext = [[CIContext alloc] init];
-                    CIImage *img = [CIImage imageWithCVPixelBuffer:srcPB];
-                    // rotate per track preferredTransform (portrait videos stored landscape)
-                    img = [img imageByApplyingTransform:[[MediaManager sharedManager] trackTransform]];
-                    CGRect ie = img.extent;
-                    if (ie.origin.x != 0 || ie.origin.y != 0)
-                        img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(-ie.origin.x, -ie.origin.y)];
-                    // aspect-fill: cover target buffer, center-crop
-                    size_t tw = CVPixelBufferGetWidth(target), th = CVPixelBufferGetHeight(target);
-                    if (ie.size.width > 0.5 && ie.size.height > 0.5 && tw && th) {
-                        CGFloat s = MAX((CGFloat)tw / ie.size.width, (CGFloat)th / ie.size.height);
-                        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(s, s)];
-                        CGFloat dx = ((CGFloat)tw - ie.size.width * s) / 2.0;
-                        CGFloat dy = ((CGFloat)th - ie.size.height * s) / 2.0;
-                        if (dx != 0 || dy != 0)
-                            img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(dx, dy)];
+                    if (!g_vcamCIContext) {
+                        g_vcamCIContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+                        g_paintColorSpace = CGColorSpaceCreateDeviceRGB();
                     }
-                    [g_vcamCIContext render:img toCVPixelBuffer:target];
+                    CIImage *img = [CIImage imageWithCVPixelBuffer:srcPB];
+                    CGRect ie = img.extent;
+                    size_t tw = CVPixelBufferGetWidth(target), th = CVPixelBufferGetHeight(target);
+                    if (tw && th && ie.size.width > 0.5 && ie.size.height > 0.5) {
+                        // rebuild combined transform only when src/dst geometry changes
+                        if (g_paintSrc.width != ie.size.width || g_paintSrc.height != ie.size.height ||
+                            g_paintDst.width != tw || g_paintDst.height != th) {
+                            CGAffineTransform T = [[MediaManager sharedManager] trackTransform];
+                            if (ie.origin.x != 0 || ie.origin.y != 0)
+                                T = CGAffineTransformConcat(T, CGAffineTransformMakeTranslation(-ie.origin.x, -ie.origin.y));
+                            CGFloat s = MAX((CGFloat)tw / ie.size.width, (CGFloat)th / ie.size.height);
+                            T = CGAffineTransformConcat(T, CGAffineTransformMakeScale(s, s));
+                            CGFloat dx = ((CGFloat)tw - ie.size.width * s) / 2.0;
+                            CGFloat dy = ((CGFloat)th - ie.size.height * s) / 2.0;
+                            if (dx != 0 || dy != 0)
+                                T = CGAffineTransformConcat(T, CGAffineTransformMakeTranslation(dx, dy));
+                            g_paintTransform = T;
+                            g_paintSrc = ie.size;
+                            g_paintDst = CGSizeMake((CGFloat)tw, (CGFloat)th);
+                        }
+                        img = [img imageByApplyingTransform:g_paintTransform];
+                        [g_vcamCIContext render:img toCVPixelBuffer:target
+                                         bounds:CGRectMake(0, 0, (CGFloat)tw, (CGFloat)th)
+                                     colorSpace:g_paintColorSpace];
+                    }
                     g_vcamCount++;
                     if (g_vcamCount == 1 || g_vcamCount % 300 == 0)
                         NSLog(@"[VCam] paint src %.0fx%.0f -> target %zux%zu fmt=0x%x", ie.size.width, ie.size.height, tw, th, CVPixelBufferGetPixelFormatType(target));
