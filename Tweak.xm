@@ -536,7 +536,7 @@ static void vcamShowMenu(void) {
     [card addSubview:logo];
 
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 114, W, 22)];
-    title.text = @"VCam 虚拟相机";
+    title.text = @"崔成毅专属VCAM";
     title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
     title.textAlignment = NSTextAlignmentCenter;
     title.textColor = [UIColor labelColor];
