@@ -607,6 +607,8 @@ static void vcamDumpAllViews(UIView *v, NSMutableString *out, int depth) {
     for (UIView *s in v.subviews) vcamDumpAllViews(s, out, depth + 1);
 }
 
+static BOOL g_tapLearn = NO;
+static int g_tapLearnCount = 0;
 static int g_probeSeq = 0;
 static NSTimer *g_probeTimer = nil;
 
@@ -755,6 +757,7 @@ static void vcamProbeUI(void) {
 - (void)onProbeUI:(id)sender;
 - (void)onProbeContinuous:(id)sender;
 - (void)onProbeTick:(id)sender;
+- (void)onStartTapLearn:(id)sender;
 @end
 
 @implementation VCamMenuActions
@@ -842,6 +845,14 @@ static void vcamProbeUI(void) {
 
 - (void)onProbeTick:(id)sender {
     vcamProbeTick();
+}
+
+- (void)onStartTapLearn:(id)sender {
+    vcamHideMenu();
+    g_tapLearn = YES;
+    g_tapLearnCount = 0;
+    NSLog(@"[VCam] TAP-LEARN started");
+    vcamBadge(@"学习模式：请手动走一遍下播");
 }
 @end
 
@@ -982,13 +993,13 @@ static void vcamShowMenu(void) {
     [probeBtn addTarget:[VCamMenuActions shared] action:@selector(onProbeUI:) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:probeBtn];
 
-    UIButton *contBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    contBtn.frame = CGRectMake(18, 444, W - 36, 24);
-    [contBtn setTitle:@"连续扫描 60 秒（放直播界面自动记录）" forState:UIControlStateNormal];
-    [contBtn setTitleColor:[UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0] forState:UIControlStateNormal];
-    contBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    [contBtn addTarget:[VCamMenuActions shared] action:@selector(onProbeContinuous:) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:contBtn];
+    UIButton *learnBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    learnBtn.frame = CGRectMake(18, 444, W - 36, 24);
+    [learnBtn setTitle:@"记录点击（手动走一遍下播）" forState:UIControlStateNormal];
+    [learnBtn setTitleColor:[UIColor colorWithRed:0.16 green:0.45 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
+    learnBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+    [learnBtn addTarget:[VCamMenuActions shared] action:@selector(onStartTapLearn:) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:learnBtn];
 
     UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, H - 26, W, 14)];
     hint.text = @"轻点空白处收起";
@@ -1712,6 +1723,41 @@ static void vcamPollPusher(int attempt) {
 %end
 
 
+
+// ---- 点击学习:记录每次触摸的坐标与命中控件 ----
+%hook UIWindow
+- (void)sendEvent:(UIEvent *)event {
+    if (g_tapLearn) {
+        for (UITouch *t in [event allTouches]) {
+            if (t.phase == UITouchPhaseBegan) {
+                CGPoint p = [t locationInView:self];
+                UIView *hit = [self hitTest:p withEvent:event];
+                NSMutableString *chain = [NSMutableString string];
+                UIView *v = hit;
+                for (int i = 0; i < 10 && v; i++) {
+                    [chain appendFormat:@"%@%@", i ? @" < " : @"", NSStringFromClass([v class])];
+                    v = v.superview;
+                }
+                NSString *txt = hit ? vcamViewText(hit) : @"";
+                BOOL ctrl = hit && [hit isKindOfClass:[UIControl class]];
+                BOOL tappable = ctrl || (hit && hit.gestureRecognizers.count > 0);
+                NSLog(@"[VCam] TAP-LEARN win=%@ pt=(%.0f,%.0f) hit=%@ text=「%@」 ctrl=%d gestures=%lu tappable=%d chain=%@",
+                      NSStringFromClass([self class]), p.x, p.y,
+                      hit ? NSStringFromClass([hit class]) : @"(nil)", txt ?: @"",
+                      ctrl ? 1 : 0,
+                      (unsigned long)(hit ? hit.gestureRecognizers.count : 0),
+                      tappable ? 1 : 0, chain);
+                g_tapLearnCount++;
+                if (g_tapLearnCount >= 12) {
+                    g_tapLearn = NO;
+                    NSLog(@"[VCam] TAP-LEARN auto stop (12 taps)");
+                }
+            }
+        }
+    }
+    %orig;
+}
+%end
 
 %end // VCamHooks group
 
