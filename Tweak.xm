@@ -777,6 +777,7 @@ static void vcamProbeUI(void) {
 - (void)onPickVideo:(id)sender;
 - (void)onToggleEnable:(id)sender;
 - (void)onScheduleTimer:(id)sender;
+- (void)onTimerSwitch:(id)sender;
 - (void)onTestEndLive:(id)sender;
 - (void)onProbeUI:(id)sender;
 - (void)onProbeContinuous:(id)sender;
@@ -828,6 +829,27 @@ static void vcamProbeUI(void) {
     vcamSetEnabledState(g_vcamEnabled);
     vcamBadge(g_vcamEnabled ? @"虚拟相机已开启" : @"虚拟相机已关闭");
     vcamHideMenu();
+}
+
+- (void)onTimerSwitch:(UISwitch *)sw {
+    VCamLiveEndScheduler *s = [VCamLiveEndScheduler shared];
+    if (!sw.isOn) {
+        [s cancel];
+        vcamBadge(@"已取消定时下播");
+        return;
+    }
+    UIDatePicker *dp = g_menuTimePicker;
+    if (!dp) { sw.on = NO; return; }
+    NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute)
+                                                          fromDate:dp.date];
+    NSDate *target = [[NSCalendar currentCalendar] dateBySettingHour:c.hour minute:c.minute second:0
+                                                              ofDate:[NSDate date] options:0];
+    if ([target timeIntervalSinceNow] <= 5) {
+        vcamBadge(@"时间已过，请重新选择");
+        sw.on = NO;
+        return;
+    }
+    [s scheduleAt:target];
 }
 
 - (void)onScheduleTimer:(id)sender {
@@ -907,8 +929,8 @@ static void vcamShowMenu(void) {
     g_menuOpen = YES;
 
     CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat W = 252.0;
-    CGFloat H = 508.0;
+    CGFloat W = 280.0;
+    CGFloat H = 396.0;
 
     VCamCatcher *catcher = [[VCamCatcher alloc] initWithFrame:screen];
     catcher.backgroundColor = [UIColor clearColor];
@@ -971,59 +993,36 @@ static void vcamShowMenu(void) {
     sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.22];
     [card addSubview:sep];
 
-    // ---- 定时下播 ----
-    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(22, 300, 120, 22)];
+    // ---- 定时下播:标签 + 时间 + 开关 ----
+    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(22, 294, 80, 22)];
     tl.text = @"定时下播";
     tl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     tl.textColor = [UIColor labelColor];
     [card addSubview:tl];
 
-    UIDatePicker *dp = [[UIDatePicker alloc] initWithFrame:CGRectMake(W - 152, 294, 136, 36)];
+    UIDatePicker *dp = [[UIDatePicker alloc] initWithFrame:CGRectMake(96, 288, 112, 36)];
     dp.datePickerMode = UIDatePickerModeTime;
     if (@available(iOS 13.4, *)) dp.preferredDatePickerStyle = UIDatePickerStyleCompact;
     dp.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
     VCamLiveEndScheduler *sched = [VCamLiveEndScheduler shared];
     if (sched.fireDate) dp.date = sched.fireDate;
-    else {
-        NSDate *def = [NSDate dateWithTimeIntervalSinceNow:1800];
-        dp.date = def;
-    }
+    else dp.date = [NSDate dateWithTimeIntervalSinceNow:1800];
     [card addSubview:dp];
     g_menuTimePicker = dp;
 
-    NSDateFormatter *dfmt = [[NSDateFormatter alloc] init];
-    dfmt.dateFormat = @"HH:mm";
-    NSString *schedTitle = sched.fireDate
-        ? [NSString stringWithFormat:@"取消定时（%@ 下播）", [dfmt stringFromDate:sched.fireDate]]
-        : @"启动定时下播";
-    UIButton *schedBtn = vcamMenuRow(schedTitle, sched.fireDate ? @"xmark.circle.fill" : @"alarm.fill", NO);
-    schedBtn.frame = CGRectMake(18, 340, W - 36, 46);
-    [schedBtn addTarget:[VCamMenuActions shared] action:@selector(onScheduleTimer:) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:schedBtn];
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(W - 18 - 51, 289, 51, 31)];
+    sw.onTintColor = [UIColor colorWithRed:0.91 green:0.16 blue:0.24 alpha:1.0];
+    sw.on = (sched.fireDate != nil);
+    [sw addTarget:[VCamMenuActions shared] action:@selector(onTimerSwitch:) forControlEvents:UIControlEventValueChanged];
+    [card addSubview:sw];
 
     UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    testBtn.frame = CGRectMake(18, 392, W - 36, 24);
+    testBtn.frame = CGRectMake(18, 336, W - 36, 24);
     [testBtn setTitle:@"立即测试下播（现在执行一次）" forState:UIControlStateNormal];
     [testBtn setTitleColor:[UIColor colorWithRed:0.16 green:0.45 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
     testBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
     [testBtn addTarget:[VCamMenuActions shared] action:@selector(onTestEndLive:) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:testBtn];
-
-    UIButton *probeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    probeBtn.frame = CGRectMake(18, 418, W - 36, 24);
-    [probeBtn setTitle:@"扫描界面（只记录，不点击）" forState:UIControlStateNormal];
-    [probeBtn setTitleColor:[UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0] forState:UIControlStateNormal];
-    probeBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
-    [probeBtn addTarget:[VCamMenuActions shared] action:@selector(onProbeUI:) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:probeBtn];
-
-    UIButton *learnBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    learnBtn.frame = CGRectMake(18, 444, W - 36, 24);
-    [learnBtn setTitle:@"记录点击（手动走一遍下播）" forState:UIControlStateNormal];
-    [learnBtn setTitleColor:[UIColor colorWithRed:0.16 green:0.45 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
-    learnBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
-    [learnBtn addTarget:[VCamMenuActions shared] action:@selector(onStartTapLearn:) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:learnBtn];
 
     UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, H - 26, W, 14)];
     hint.text = @"轻点空白处收起";
