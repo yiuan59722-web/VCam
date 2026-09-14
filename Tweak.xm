@@ -479,7 +479,7 @@ static BOOL vcamTriggerTap(UIView *v) {
             Ivar ivT = class_getInstanceVariable(object_getClass(t), "_target");
             Ivar ivA = class_getInstanceVariable(object_getClass(t), "_action");
             if (!ivT || !ivA) continue;
-            id tgt = *(id *)((char *)(__bridge void *)t + ivar_getOffset(ivT));
+            id tgt = *(__unsafe_unretained id *)((char *)(__bridge void *)t + ivar_getOffset(ivT));
             SEL act = *(SEL *)((char *)(__bridge void *)t + ivar_getOffset(ivA));
             if (tgt && act && [tgt respondsToSelector:act]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(tgt, act, g);
