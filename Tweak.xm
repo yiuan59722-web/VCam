@@ -417,6 +417,10 @@ static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
 // ============================================================================
 
 static UIDatePicker *g_menuTimePicker = nil;
+static NSDate *g_menuTimeValue = nil;
+static UIButton *g_menuTimeChip = nil;
+static BOOL g_timePanelOpen = NO;
+static BOOL g_menuRefreshing = NO;
 
 // 收集 App 的所有窗口(场景 API + 旧 windows 属性兜底)
 static NSArray<UIWindow *> *vcamAllWindows(void) {
@@ -778,6 +782,8 @@ static void vcamProbeUI(void) {
 - (void)onToggleEnable:(id)sender;
 - (void)onScheduleTimer:(id)sender;
 - (void)onTimerSwitch:(id)sender;
+- (void)onToggleTimePanel:(id)sender;
+- (void)onWheelChanged:(UIDatePicker *)wp;
 - (void)onTestEndLive:(id)sender;
 - (void)onProbeUI:(id)sender;
 - (void)onProbeContinuous:(id)sender;
@@ -831,6 +837,20 @@ static void vcamProbeUI(void) {
     vcamHideMenu();
 }
 
+- (void)onToggleTimePanel:(id)sender {
+    g_timePanelOpen = !g_timePanelOpen;
+    vcamRefreshMenu();
+}
+
+- (void)onWheelChanged:(UIDatePicker *)wp {
+    g_menuTimeValue = wp.date;
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"HH:mm";
+    if (g_menuTimeChip) {
+        [g_menuTimeChip setTitle:[fmt stringFromDate:wp.date] forState:UIControlStateNormal];
+    }
+}
+
 - (void)onTimerSwitch:(UISwitch *)sw {
     VCamLiveEndScheduler *s = [VCamLiveEndScheduler shared];
     if (!sw.isOn) {
@@ -838,10 +858,9 @@ static void vcamProbeUI(void) {
         vcamBadge(@"已取消定时下播");
         return;
     }
-    UIDatePicker *dp = g_menuTimePicker;
-    if (!dp) { sw.on = NO; return; }
+    NSDate *picked = g_menuTimeValue ?: [NSDate dateWithTimeIntervalSinceNow:1800];
     NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute)
-                                                          fromDate:dp.date];
+                                                          fromDate:picked];
     NSDate *target = [[NSCalendar currentCalendar] dateBySettingHour:c.hour minute:c.minute second:0
                                                               ofDate:[NSDate date] options:0];
     if ([target timeIntervalSinceNow] <= 5) {
@@ -922,6 +941,16 @@ static UIButton *vcamMenuRow(NSString *title, NSString *symbol, BOOL primary) {
     return row;
 }
 
+static void vcamRefreshMenu(void) {
+    g_menuRefreshing = YES;
+    vcamHideMenu();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        g_menuRefreshing = NO;
+        vcamShowMenu();
+    });
+}
+
 static void vcamShowMenu(void) {
     if (g_menuOpen || !g_floatButton || !g_overlayWindow) return;
     UIViewController *rootVC = g_overlayWindow.rootViewController;
@@ -929,8 +958,8 @@ static void vcamShowMenu(void) {
     g_menuOpen = YES;
 
     CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat W = 280.0;
-    CGFloat H = 396.0;
+    CGFloat W = 300.0;
+    CGFloat H = g_timePanelOpen ? 672.0 : 396.0;
 
     VCamCatcher *catcher = [[VCamCatcher alloc] initWithFrame:screen];
     catcher.backgroundColor = [UIColor clearColor];
@@ -993,31 +1022,52 @@ static void vcamShowMenu(void) {
     sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.22];
     [card addSubview:sep];
 
-    // ---- 定时下播:标签 + 时间 + 开关 ----
+    // ---- 定时下播:标签 + 时间按钮 + 开关 ----
     UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(22, 294, 80, 22)];
     tl.text = @"定时下播";
     tl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     tl.textColor = [UIColor labelColor];
     [card addSubview:tl];
 
-    UIDatePicker *dp = [[UIDatePicker alloc] initWithFrame:CGRectMake(96, 288, 112, 36)];
-    dp.datePickerMode = UIDatePickerModeTime;
-    if (@available(iOS 13.4, *)) dp.preferredDatePickerStyle = UIDatePickerStyleCompact;
-    dp.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
-    VCamLiveEndScheduler *sched = [VCamLiveEndScheduler shared];
-    if (sched.fireDate) dp.date = sched.fireDate;
-    else dp.date = [NSDate dateWithTimeIntervalSinceNow:1800];
-    [card addSubview:dp];
-    g_menuTimePicker = dp;
+    if (!g_menuTimeValue) g_menuTimeValue = [NSDate dateWithTimeIntervalSinceNow:1800];
+    NSDateFormatter *hmFmt = [[NSDateFormatter alloc] init];
+    hmFmt.dateFormat = @"HH:mm";
+    UIButton *chip = [UIButton buttonWithType:UIButtonTypeSystem];
+    chip.frame = CGRectMake(96, 288, 92, 34);
+    chip.layer.cornerRadius = 11;
+    chip.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.13];
+    [chip setTitle:[hmFmt stringFromDate:g_menuTimeValue] forState:UIControlStateNormal];
+    [chip setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+    chip.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightSemibold];
+    [chip addTarget:[VCamMenuActions shared] action:@selector(onToggleTimePanel:) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:chip];
+    g_menuTimeChip = chip;
 
+    VCamLiveEndScheduler *sched = [VCamLiveEndScheduler shared];
     UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(W - 18 - 51, 289, 51, 31)];
     sw.onTintColor = [UIColor colorWithRed:0.91 green:0.16 blue:0.24 alpha:1.0];
     sw.on = (sched.fireDate != nil);
     [sw addTarget:[VCamMenuActions shared] action:@selector(onTimerSwitch:) forControlEvents:UIControlEventValueChanged];
     [card addSubview:sw];
 
+    // ---- 展开的时间滚轮 ----
+    if (g_timePanelOpen) {
+        UIDatePicker *wp = [[UIDatePicker alloc] initWithFrame:CGRectMake((W - 216) / 2.0, 328, 216, 216)];
+        wp.datePickerMode = UIDatePickerModeTime;
+        if (@available(iOS 13.4, *)) wp.preferredDatePickerStyle = UIDatePickerStyleWheels;
+        wp.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+        wp.date = g_menuTimeValue;
+        [wp addTarget:[VCamMenuActions shared] action:@selector(onWheelChanged:) forControlEvents:UIControlEventValueChanged];
+        [card addSubview:wp];
+
+        UIButton *doneBtn = vcamMenuRow(@"完成", @"checkmark.circle.fill", NO);
+        doneBtn.frame = CGRectMake(18, 552, W - 36, 42);
+        [doneBtn addTarget:[VCamMenuActions shared] action:@selector(onToggleTimePanel:) forControlEvents:UIControlEventTouchUpInside];
+        [card addSubview:doneBtn];
+    }
+
     UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    testBtn.frame = CGRectMake(18, 336, W - 36, 24);
+    testBtn.frame = CGRectMake(18, g_timePanelOpen ? 602 : 336, W - 36, 24);
     [testBtn setTitle:@"立即测试下播（现在执行一次）" forState:UIControlStateNormal];
     [testBtn setTitleColor:[UIColor colorWithRed:0.16 green:0.45 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
     testBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
@@ -1055,6 +1105,7 @@ static void vcamShowMenu(void) {
 static void vcamHideMenu(void) {
     if (!g_menuOpen) return;
     g_menuOpen = NO;
+    if (!g_menuRefreshing) g_timePanelOpen = NO;
     UIView *card = g_menuCard;
     UIView *catcher = g_menuCatcher;
     g_menuCard = nil;
