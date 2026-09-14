@@ -413,6 +413,162 @@ static VCamPHPickerDelegate *g_phpDelegate = nil;
 static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
 
 // ============================================================================
+// MARK: - 定时下播（UI 自动化）
+// ============================================================================
+
+static UIDatePicker *g_menuTimePicker = nil;
+
+static UIView *vcamKeyRootView(void) {
+    for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow && w != g_overlayWindow) return w.rootViewController.view;
+        }
+    }
+    return nil;
+}
+
+static NSString *vcamViewText(UIView *v) {
+    NSMutableString *s = [NSMutableString string];
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        if (l.text.length) [s appendString:l.text];
+    }
+    if ([v isKindOfClass:[UIButton class]]) {
+        UIButton *b = (UIButton *)v;
+        NSString *t = [b titleForState:UIControlStateNormal];
+        if (t.length) [s appendString:t];
+    }
+    if (v.accessibilityLabel.length) {
+        if (s.length) [s appendString:@"|"];
+        [s appendString:v.accessibilityLabel];
+    }
+    return s;
+}
+
+static void vcamCollectTappables(UIView *root, NSArray *keywords, NSMutableArray *out, NSMutableString *dump) {
+    if (!root || root.hidden || root.alpha < 0.05) return;
+    NSString *txt = vcamViewText(root);
+    BOOL tappable = [root isKindOfClass:[UIControl class]] ||
+                    (root.gestureRecognizers.count > 0 && root.userInteractionEnabled);
+    if (tappable) {
+        [dump appendFormat:@"  %@ text=%@ %@\n",
+         NSStringFromClass([root class]), txt,
+         NSStringFromCGRect([root convertRect:root.bounds toView:nil])];
+        for (NSString *k in keywords) {
+            if (txt.length && [txt rangeOfString:k].location != NSNotFound) {
+                [out addObject:root];
+                break;
+            }
+        }
+    }
+    for (UIView *sub in root.subviews) vcamCollectTappables(sub, keywords, out, dump);
+}
+
+static BOOL vcamTriggerTap(UIView *v) {
+    if ([v isKindOfClass:[UIControl class]]) {
+        [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+        NSLog(@"[VCam] AUTO-END tap UIControl %@ text=%@", NSStringFromClass([v class]), vcamViewText(v));
+        return YES;
+    }
+    for (UIGestureRecognizer *g in v.gestureRecognizers) {
+        if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+        NSArray *targets = nil;
+        @try { targets = [g valueForKey:@"_targets"]; } @catch (NSException *e) { targets = nil; }
+        for (id t in targets) {
+            Ivar ivT = class_getInstanceVariable(object_getClass(t), "_target");
+            Ivar ivA = class_getInstanceVariable(object_getClass(t), "_action");
+            if (!ivT || !ivA) continue;
+            id tgt = *(id *)((char *)(__bridge void *)t + ivar_getOffset(ivT));
+            SEL act = *(SEL *)((char *)(__bridge void *)t + ivar_getOffset(ivA));
+            if (tgt && act && [tgt respondsToSelector:act]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(tgt, act, g);
+                NSLog(@"[VCam] AUTO-END tap gesture on %@ text=%@ act=%@",
+                      NSStringFromClass([v class]), vcamViewText(v), NSStringFromSelector(act));
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+static void vcamAutoEndStep(int step);
+
+static void vcamPerformAutoEndLive(void) {
+    NSLog(@"[VCam] AUTO-END ==== begin ====");
+    vcamBadge(@"开始执行下播…");
+    vcamAutoEndStep(1);
+}
+
+static void vcamAutoEndStep(int step) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *root = vcamKeyRootView();
+        if (!root) { NSLog(@"[VCam] AUTO-END no key window"); return; }
+
+        NSArray *kws = (step == 1)
+            ? @[@"结束直播", @"关闭直播", @"关闭", @"退出", @"下播"]
+            : @[@"结束直播", @"确定结束", @"结束", @"确定", @"确认", @"下播"];
+
+        NSMutableArray *hits = [NSMutableArray array];
+        NSMutableString *dump = [NSMutableString string];
+        vcamCollectTappables(root, kws, hits, dump);
+        NSLog(@"[VCam] AUTO-END step%d dump:\n%@", step, dump);
+
+        if (hits.count) {
+            UIView *best = hits.firstObject;
+            for (UIView *v in hits) { if ([v isKindOfClass:[UIButton class]]) { best = v; break; } }
+            vcamTriggerTap(best);
+        } else {
+            NSLog(@"[VCam] AUTO-END step%d no candidate found", step);
+            if (step == 1) vcamBadge(@"未找到下播入口");
+        }
+
+        if (step == 1) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ vcamAutoEndStep(2); });
+        } else {
+            vcamBadge(@"已执行下播操作");
+        }
+    });
+}
+
+@interface VCamLiveEndScheduler : NSObject
+@property (nonatomic, strong) NSTimer *timer;
+@property (nonatomic, strong) NSDate *fireDate;
++ (instancetype)shared;
+- (void)scheduleAt:(NSDate *)date;
+- (void)cancel;
+@end
+
+@implementation VCamLiveEndScheduler
++ (instancetype)shared {
+    static VCamLiveEndScheduler *o = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ o = [[VCamLiveEndScheduler alloc] init]; });
+    return o;
+}
+- (void)scheduleAt:(NSDate *)date {
+    [self cancel];
+    NSTimeInterval iv = [date timeIntervalSinceNow];
+    if (iv <= 0) { vcamBadge(@"时间已过"); return; }
+    self.fireDate = date;
+    self.timer = [NSTimer scheduledTimerWithTimeInterval:iv target:self
+                                                selector:@selector(onFire) userInfo:nil repeats:NO];
+    NSLog(@"[VCam] AUTO-END scheduled at %@ (%.0fs later)", date, iv);
+    vcamBadge([NSString stringWithFormat:@"%.0f 分钟后自动下播", iv / 60.0]);
+}
+- (void)cancel {
+    if (self.timer) { [self.timer invalidate]; self.timer = nil; }
+    self.fireDate = nil;
+}
+- (void)onFire {
+    self.timer = nil;
+    NSLog(@"[VCam] AUTO-END timer fired, executing");
+    vcamPerformAutoEndLive();
+}
+@end
+
+// ============================================================================
 // MARK: - 悬浮菜单（高级感卡片）
 // ============================================================================
 
@@ -427,6 +583,8 @@ static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
 + (instancetype)shared;
 - (void)onPickVideo:(id)sender;
 - (void)onToggleEnable:(id)sender;
+- (void)onScheduleTimer:(id)sender;
+- (void)onTestEndLive:(id)sender;
 @end
 
 @implementation VCamMenuActions
@@ -474,6 +632,33 @@ static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
     vcamBadge(g_vcamEnabled ? @"虚拟相机已开启" : @"虚拟相机已关闭");
     vcamHideMenu();
 }
+
+- (void)onScheduleTimer:(id)sender {
+    VCamLiveEndScheduler *s = [VCamLiveEndScheduler shared];
+    if (s.fireDate) {
+        [s cancel];
+        vcamBadge(@"已取消定时下播");
+        vcamHideMenu();
+        return;
+    }
+    UIDatePicker *dp = g_menuTimePicker;
+    if (!dp) return;
+    NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute)
+                                                          fromDate:dp.date];
+    NSDate *target = [[NSCalendar currentCalendar] dateBySettingHour:c.hour minute:c.minute second:0
+                                                              ofDate:[NSDate date] options:0];
+    if ([target timeIntervalSinceNow] <= 5) {
+        vcamBadge(@"时间已过，请重新选择");
+        return;
+    }
+    [s scheduleAt:target];
+    vcamHideMenu();
+}
+
+- (void)onTestEndLive:(id)sender {
+    vcamHideMenu();
+    vcamPerformAutoEndLive();
+}
 @end
 
 static UIButton *vcamMenuRow(NSString *title, NSString *symbol, BOOL primary) {
@@ -504,7 +689,7 @@ static void vcamShowMenu(void) {
 
     CGRect screen = [UIScreen mainScreen].bounds;
     CGFloat W = 252.0;
-    CGFloat H = 300.0;
+    CGFloat H = 452.0;
 
     VCamCatcher *catcher = [[VCamCatcher alloc] initWithFrame:screen];
     catcher.backgroundColor = [UIColor clearColor];
@@ -561,6 +746,49 @@ static void vcamShowMenu(void) {
     tog.frame = CGRectMake(18, 224, W - 36, 46);
     [tog addTarget:[VCamMenuActions shared] action:@selector(onToggleEnable:) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:tog];
+
+    // ---- 分割线 ----
+    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(18, 286, W - 36, 0.5)];
+    sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.22];
+    [card addSubview:sep];
+
+    // ---- 定时下播 ----
+    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(22, 300, 120, 22)];
+    tl.text = @"定时下播";
+    tl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    tl.textColor = [UIColor labelColor];
+    [card addSubview:tl];
+
+    UIDatePicker *dp = [[UIDatePicker alloc] initWithFrame:CGRectMake(W - 152, 294, 136, 36)];
+    dp.datePickerMode = UIDatePickerModeTime;
+    if (@available(iOS 13.4, *)) dp.preferredDatePickerStyle = UIDatePickerStyleCompact;
+    dp.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    VCamLiveEndScheduler *sched = [VCamLiveEndScheduler shared];
+    if (sched.fireDate) dp.date = sched.fireDate;
+    else {
+        NSDate *def = [NSDate dateWithTimeIntervalSinceNow:1800];
+        dp.date = def;
+    }
+    [card addSubview:dp];
+    g_menuTimePicker = dp;
+
+    NSDateFormatter *dfmt = [[NSDateFormatter alloc] init];
+    dfmt.dateFormat = @"HH:mm";
+    NSString *schedTitle = sched.fireDate
+        ? [NSString stringWithFormat:@"取消定时（%@ 下播）", [dfmt stringFromDate:sched.fireDate]]
+        : @"启动定时下播";
+    UIButton *schedBtn = vcamMenuRow(schedTitle, sched.fireDate ? @"xmark.circle.fill" : @"alarm.fill", NO);
+    schedBtn.frame = CGRectMake(18, 340, W - 36, 46);
+    [schedBtn addTarget:[VCamMenuActions shared] action:@selector(onScheduleTimer:) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:schedBtn];
+
+    UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    testBtn.frame = CGRectMake(18, 392, W - 36, 24);
+    [testBtn setTitle:@"立即测试下播（现在执行一次）" forState:UIControlStateNormal];
+    [testBtn setTitleColor:[UIColor colorWithRed:0.16 green:0.45 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
+    testBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    [testBtn addTarget:[VCamMenuActions shared] action:@selector(onTestEndLive:) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:testBtn];
 
     UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, H - 26, W, 14)];
     hint.text = @"轻点空白处收起";
