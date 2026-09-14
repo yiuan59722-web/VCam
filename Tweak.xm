@@ -472,51 +472,7 @@ static NSString *vcamViewText(UIView *v) {
     return s;
 }
 
-static void vcamCollectTappables(UIView *root, NSArray *keywords, NSMutableArray *out, NSMutableString *dump) {
-    if (!root || root.hidden || root.alpha < 0.05) return;
-    NSString *txt = vcamViewText(root);
-    BOOL tappable = [root isKindOfClass:[UIControl class]] ||
-                    (root.gestureRecognizers.count > 0 && root.userInteractionEnabled);
-    if (tappable) {
-        [dump appendFormat:@"  %@ text=%@ %@\n",
-         NSStringFromClass([root class]), txt,
-         NSStringFromCGRect([root convertRect:root.bounds toView:nil])];
-        for (NSString *k in keywords) {
-            if (txt.length && [txt rangeOfString:k].location != NSNotFound) {
-                [out addObject:root];
-                break;
-            }
-        }
-    }
-    for (UIView *sub in root.subviews) vcamCollectTappables(sub, keywords, out, dump);
-}
 
-static BOOL vcamTriggerTap(UIView *v) {
-    if ([v isKindOfClass:[UIControl class]]) {
-        [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
-        NSLog(@"[VCam] AUTO-END tap UIControl %@ text=%@", NSStringFromClass([v class]), vcamViewText(v));
-        return YES;
-    }
-    for (UIGestureRecognizer *g in v.gestureRecognizers) {
-        if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
-        NSArray *targets = nil;
-        @try { targets = [g valueForKey:@"_targets"]; } @catch (NSException *e) { targets = nil; }
-        for (id t in targets) {
-            Ivar ivT = class_getInstanceVariable(object_getClass(t), "_target");
-            Ivar ivA = class_getInstanceVariable(object_getClass(t), "_action");
-            if (!ivT || !ivA) continue;
-            id tgt = object_getIvar(t, ivT);
-            SEL act = *(SEL *)((char *)(__bridge void *)t + ivar_getOffset(ivA));
-            if (tgt && act && [tgt respondsToSelector:act]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(tgt, act, g);
-                NSLog(@"[VCam] AUTO-END tap gesture on %@ text=%@ act=%@",
-                      NSStringFromClass([v class]), vcamViewText(v), NSStringFromSelector(act));
-                return YES;
-            }
-        }
-    }
-    return NO;
-}
 
 static void vcamAutoEndStep(int step);
 
@@ -527,21 +483,6 @@ static void vcamPerformAutoEndLive(void) {
 }
 
 // 收集所有窗口里"右上角区域"的可点击控件（找 ✕ 用）
-static void vcamCollectTopRight(UIView *root, NSMutableArray *out) {
-    if (!root || root.hidden || root.alpha < 0.05) return;
-    CGRect scr = [UIScreen mainScreen].bounds;
-    BOOL tappable = [root isKindOfClass:[UIControl class]] ||
-                    (root.gestureRecognizers.count > 0 && root.userInteractionEnabled);
-    if (tappable) {
-        CGRect f = [root convertRect:root.bounds toView:nil];
-        if (CGRectGetMidX(f) > scr.size.width * 0.55 &&
-            CGRectGetMidY(f) < scr.size.height * 0.28 &&
-            f.size.width > 12 && f.size.height > 12) {
-            [out addObject:root];
-        }
-    }
-    for (UIView *sub in root.subviews) vcamCollectTopRight(sub, out);
-}
 
 // 深度优先找满足条件的视图
 static UIView *vcamFindView(UIView *root, BOOL (^pred)(UIView *v)) {
