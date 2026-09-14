@@ -440,11 +440,6 @@ static NSArray<UIView *> *vcamAppRootViews(void) {
     return out;
 }
 
-static UIView *vcamKeyRootView(void) {
-    NSArray<UIView *> *roots = vcamAppRootViews();
-    return roots.count ? roots.firstObject : nil;
-}
-
 static NSString *vcamViewText(UIView *v) {
     NSMutableString *s = [NSMutableString string];
     if ([v isKindOfClass:[UILabel class]]) {
