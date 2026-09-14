@@ -30,6 +30,8 @@ static NSUInteger g_pillToken = 0;
 static void vcamSetEnabledState(BOOL on);
 static void vcamToggleMenu(void);
 static void vcamHideMenu(void);
+static void vcamShowMenu(void);
+static void vcamRefreshMenu(void);
 
 // ---- Logo（base64 内嵌）----
 static UIImage *vcamLogoImage(BOOL full) {
