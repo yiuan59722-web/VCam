@@ -532,6 +532,41 @@ static void vcamAutoEndStep(int step) {
     });
 }
 
+static void vcamDumpAllViews(UIView *v, NSMutableString *out, int depth) {
+    if (!v || depth > 14) return;
+    NSString *txt = vcamViewText(v);
+    BOOL tappable = [v isKindOfClass:[UIControl class]] || v.gestureRecognizers.count > 0;
+    if (txt.length || tappable) {
+        [out appendFormat:@"%@%@%@ %@ %@\n",
+         [@"" stringByPaddingToLength:(NSUInteger)(depth * 2) withString:@" " startingAtIndex:0],
+         NSStringFromClass([v class]),
+         txt.length ? [NSString stringWithFormat:@" text=「%@」", txt] : @"",
+         tappable ? @"[可点]" : @"[不可点]",
+         NSStringFromCGRect([v convertRect:v.bounds toView:nil])];
+    }
+    for (UIView *s in v.subviews) vcamDumpAllViews(s, out, depth + 1);
+}
+
+static void vcamProbeUI(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *root = vcamKeyRootView();
+        if (!root) { NSLog(@"[VCam] PROBE no key window"); return; }
+        NSMutableString *dump = [NSMutableString string];
+        vcamDumpAllViews(root, dump, 0);
+        NSLog(@"[VCam] PROBE-UI BEGIN (len=%lu)", (unsigned long)dump.length);
+        NSUInteger len = dump.length, pos = 0, idx = 0;
+        while (pos < len) {
+            NSUInteger chunk = MIN((NSUInteger)1100, len - pos);
+            NSLog(@"[VCam] PROBE-UI #%lu %@", (unsigned long)idx,
+                  [dump substringWithRange:NSMakeRange(pos, chunk)]);
+            pos += chunk;
+            idx++;
+        }
+        NSLog(@"[VCam] PROBE-UI END (chunks=%lu)", (unsigned long)idx);
+        vcamBadge(@"已扫描，日志已记录");
+    });
+}
+
 @interface VCamLiveEndScheduler : NSObject
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) NSDate *fireDate;
@@ -585,6 +620,7 @@ static void vcamAutoEndStep(int step) {
 - (void)onToggleEnable:(id)sender;
 - (void)onScheduleTimer:(id)sender;
 - (void)onTestEndLive:(id)sender;
+- (void)onProbeUI:(id)sender;
 @end
 
 @implementation VCamMenuActions
@@ -659,6 +695,11 @@ static void vcamAutoEndStep(int step) {
     vcamHideMenu();
     vcamPerformAutoEndLive();
 }
+
+- (void)onProbeUI:(id)sender {
+    vcamHideMenu();
+    vcamProbeUI();
+}
 @end
 
 static UIButton *vcamMenuRow(NSString *title, NSString *symbol, BOOL primary) {
@@ -689,7 +730,7 @@ static void vcamShowMenu(void) {
 
     CGRect screen = [UIScreen mainScreen].bounds;
     CGFloat W = 252.0;
-    CGFloat H = 452.0;
+    CGFloat H = 480.0;
 
     VCamCatcher *catcher = [[VCamCatcher alloc] initWithFrame:screen];
     catcher.backgroundColor = [UIColor clearColor];
@@ -789,6 +830,14 @@ static void vcamShowMenu(void) {
     testBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
     [testBtn addTarget:[VCamMenuActions shared] action:@selector(onTestEndLive:) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:testBtn];
+
+    UIButton *probeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    probeBtn.frame = CGRectMake(18, 418, W - 36, 24);
+    [probeBtn setTitle:@"扫描界面（只记录，不点击）" forState:UIControlStateNormal];
+    [probeBtn setTitleColor:[UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0] forState:UIControlStateNormal];
+    probeBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    [probeBtn addTarget:[VCamMenuActions shared] action:@selector(onProbeUI:) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:probeBtn];
 
     UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, H - 26, W, 14)];
     hint.text = @"轻点空白处收起";
