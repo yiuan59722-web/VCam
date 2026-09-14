@@ -418,14 +418,31 @@ static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
 
 static UIDatePicker *g_menuTimePicker = nil;
 
-static UIView *vcamKeyRootView(void) {
+// 收集 App 的所有可见窗口根视图（排除悬浮窗自身），按层级从低到高
+static NSArray<UIView *> *vcamAppRootViews(void) {
+    NSMutableArray *wins = [NSMutableArray array];
     for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
         if (![sc isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-            if (w.isKeyWindow && w != g_overlayWindow) return w.rootViewController.view;
+            if (w == g_overlayWindow) continue;
+            if (w.hidden || w.alpha < 0.01) continue;
+            if (!w.rootViewController) continue;
+            if (w.rootViewController.view) [wins addObject:w];
         }
     }
-    return nil;
+    [wins sortUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *b) {
+        if (a.isKeyWindow != b.isKeyWindow) return a.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
+        if (a.windowLevel != b.windowLevel) return a.windowLevel < b.windowLevel ? NSOrderedAscending : NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    NSMutableArray *out = [NSMutableArray array];
+    for (UIWindow *w in wins) [out addObject:w.rootViewController.view];
+    return out;
+}
+
+static UIView *vcamKeyRootView(void) {
+    NSArray<UIView *> *roots = vcamAppRootViews();
+    return roots.count ? roots.firstObject : nil;
 }
 
 static NSString *vcamViewText(UIView *v) {
@@ -500,10 +517,27 @@ static void vcamPerformAutoEndLive(void) {
     vcamAutoEndStep(1);
 }
 
+// 收集所有窗口里"右上角区域"的可点击控件（找 ✕ 用）
+static void vcamCollectTopRight(UIView *root, NSMutableArray *out) {
+    if (!root || root.hidden || root.alpha < 0.05) return;
+    CGRect scr = [UIScreen mainScreen].bounds;
+    BOOL tappable = [root isKindOfClass:[UIControl class]] ||
+                    (root.gestureRecognizers.count > 0 && root.userInteractionEnabled);
+    if (tappable) {
+        CGRect f = [root convertRect:root.bounds toView:nil];
+        if (CGRectGetMidX(f) > scr.size.width * 0.55 &&
+            CGRectGetMidY(f) < scr.size.height * 0.28 &&
+            f.size.width > 12 && f.size.height > 12) {
+            [out addObject:root];
+        }
+    }
+    for (UIView *sub in root.subviews) vcamCollectTopRight(sub, out);
+}
+
 static void vcamAutoEndStep(int step) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIView *root = vcamKeyRootView();
-        if (!root) { NSLog(@"[VCam] AUTO-END no key window"); return; }
+        NSArray<UIView *> *roots = vcamAppRootViews();
+        if (!roots.count) { NSLog(@"[VCam] AUTO-END no window"); return; }
 
         NSArray *kws = (step == 1)
             ? @[@"结束直播", @"关闭直播", @"关闭", @"退出", @"下播"]
@@ -511,20 +545,34 @@ static void vcamAutoEndStep(int step) {
 
         NSMutableArray *hits = [NSMutableArray array];
         NSMutableString *dump = [NSMutableString string];
-        vcamCollectTappables(root, kws, hits, dump);
+        for (UIView *root in roots) {
+            vcamCollectTappables(root, kws, hits, dump);
+        }
         NSLog(@"[VCam] AUTO-END step%d dump:\n%@", step, dump);
 
+        UIView *picked = nil;
         if (hits.count) {
-            UIView *best = hits.firstObject;
-            for (UIView *v in hits) { if ([v isKindOfClass:[UIButton class]]) { best = v; break; } }
-            vcamTriggerTap(best);
+            picked = hits.firstObject;
+            for (UIView *v in hits) { if ([v isKindOfClass:[UIButton class]]) { picked = v; break; } }
+        } else if (step == 1) {
+            // 没有文字命中：用"右上角区域"启发式找 ✕
+            NSMutableArray *tr = [NSMutableArray array];
+            for (UIView *root in roots) vcamCollectTopRight(root, tr);
+            if (tr.count) {
+                picked = tr.firstObject;
+                NSLog(@"[VCam] AUTO-END step1 fallback to top-right control (%lu candidates)", (unsigned long)tr.count);
+            }
+        }
+
+        if (picked) {
+            vcamTriggerTap(picked);
         } else {
-            NSLog(@"[VCam] AUTO-END step%d no candidate found", step);
+            NSLog(@"[VCam] AUTO-END step%d no candidate", step);
             if (step == 1) vcamBadge(@"未找到下播入口");
         }
 
         if (step == 1) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ vcamAutoEndStep(2); });
         } else {
             vcamBadge(@"已执行下播操作");
@@ -549,11 +597,22 @@ static void vcamDumpAllViews(UIView *v, NSMutableString *out, int depth) {
 
 static void vcamProbeUI(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIView *root = vcamKeyRootView();
-        if (!root) { NSLog(@"[VCam] PROBE no key window"); return; }
+        NSArray<UIView *> *roots = vcamAppRootViews();
+        if (!roots.count) {
+            NSLog(@"[VCam] PROBE no window at all");
+            vcamBadge(@"扫描失败：无窗口");
+            return;
+        }
         NSMutableString *dump = [NSMutableString string];
-        vcamDumpAllViews(root, dump, 0);
-        NSLog(@"[VCam] PROBE-UI BEGIN (len=%lu)", (unsigned long)dump.length);
+        NSInteger wi = 0;
+        for (UIView *root in roots) {
+            [dump appendFormat:@"=== WINDOW %ld (class=%@) ===\n", (long)wi,
+             NSStringFromClass([root.superview class])];
+            vcamDumpAllViews(root, dump, 0);
+            wi++;
+        }
+        NSLog(@"[VCam] PROBE-UI BEGIN (windows=%lu len=%lu)",
+              (unsigned long)roots.count, (unsigned long)dump.length);
         NSUInteger len = dump.length, pos = 0, idx = 0;
         while (pos < len) {
             NSUInteger chunk = MIN((NSUInteger)1100, len - pos);
