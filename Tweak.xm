@@ -418,17 +418,31 @@ static VCamImagePickerControllerDelegate *g_pickerDelegate = nil;
 
 static UIDatePicker *g_menuTimePicker = nil;
 
-// 收集 App 的所有可见窗口根视图（排除悬浮窗自身），按层级从低到高
-static NSArray<UIView *> *vcamAppRootViews(void) {
-    NSMutableArray *wins = [NSMutableArray array];
+// 收集 App 的所有窗口(场景 API + 旧 windows 属性兜底)
+static NSArray<UIWindow *> *vcamAllWindows(void) {
+    NSMutableArray *out = [NSMutableArray array];
     for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
         if (![sc isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-            if (w == g_overlayWindow) continue;
-            if (w.hidden || w.alpha < 0.01) continue;
-            if (!w.rootViewController) continue;
-            if (w.rootViewController.view) [wins addObject:w];
+            if (![out containsObject:w]) [out addObject:w];
         }
+    }
+    NSArray *legacy = nil;
+    @try { legacy = [[UIApplication sharedApplication] windows]; } @catch (NSException *e) { legacy = nil; }
+    for (UIWindow *w in legacy) {
+        if (![out containsObject:w]) [out addObject:w];
+    }
+    return out;
+}
+
+// 可见窗口根视图（排除悬浮窗自身），按 key/层级排序
+static NSArray<UIView *> *vcamAppRootViews(void) {
+    NSMutableArray *wins = [NSMutableArray array];
+    for (UIWindow *w in vcamAllWindows()) {
+        if (w == g_overlayWindow) continue;
+        if (w.alpha < 0.01) continue;
+        if (!w.rootViewController) continue;
+        if (w.rootViewController.view) [wins addObject:w];
     }
     [wins sortUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *b) {
         if (a.isKeyWindow != b.isKeyWindow) return a.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
@@ -575,8 +589,11 @@ static void vcamAutoEndStep(int step) {
     });
 }
 
+static int g_dumpNodes = 0;
+
 static void vcamDumpAllViews(UIView *v, NSMutableString *out, int depth) {
-    if (!v || depth > 14) return;
+    if (!v || depth > 16) return;
+    if (++g_dumpNodes > 500) return;
     NSString *txt = vcamViewText(v);
     BOOL tappable = [v isKindOfClass:[UIControl class]] || v.gestureRecognizers.count > 0;
     if (txt.length || tappable) {
@@ -592,31 +609,45 @@ static void vcamDumpAllViews(UIView *v, NSMutableString *out, int depth) {
 
 static void vcamProbeUI(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSArray<UIView *> *roots = vcamAppRootViews();
-        if (!roots.count) {
-            NSLog(@"[VCam] PROBE no window at all");
-            vcamBadge(@"扫描失败：无窗口");
-            return;
-        }
-        NSMutableString *dump = [NSMutableString string];
+        NSArray<UIWindow *> *wins = vcamAllWindows();
+        NSLog(@"[VCam] PROBE-UI BEGIN (total windows=%lu)", (unsigned long)wins.count);
+
+        // 1) 先打印每个窗口的详细信息
         NSInteger wi = 0;
-        for (UIView *root in roots) {
-            [dump appendFormat:@"=== WINDOW %ld (class=%@) ===\n", (long)wi,
-             NSStringFromClass([root.superview class])];
-            vcamDumpAllViews(root, dump, 0);
+        for (UIWindow *w in wins) {
+            UIViewController *rvc = w.rootViewController;
+            NSUInteger subCount = rvc.view ? rvc.view.subviews.count : 0;
+            NSLog(@"[VCam] PROBE-WIN #%ld class=%@ level=%.0f key=%d hidden=%d alpha=%.2f rootVC=%@ rootViewSubviews=%lu isOverlay=%d",
+                  (long)wi, NSStringFromClass([w class]), (double)w.windowLevel,
+                  w.isKeyWindow ? 1 : 0, w.hidden ? 1 : 0, (double)w.alpha,
+                  rvc ? NSStringFromClass([rvc class]) : @"(nil)",
+                  (unsigned long)subCount,
+                  (w == g_overlayWindow) ? 1 : 0);
             wi++;
         }
-        NSLog(@"[VCam] PROBE-UI BEGIN (windows=%lu len=%lu)",
-              (unsigned long)roots.count, (unsigned long)dump.length);
-        NSUInteger len = dump.length, pos = 0, idx = 0;
+
+        // 2) 视图树 dump(带节点上限)
+        NSMutableString *dump = [NSMutableString string];
+        g_dumpNodes = 0;
+        NSInteger idx2 = 0;
+        for (UIWindow *w in wins) {
+            if (w == g_overlayWindow) continue;
+            if (!w.rootViewController.view) continue;
+            [dump appendFormat:@"=== WIN %ld %@ level=%.0f key=%d ===\n",
+             (long)idx2, NSStringFromClass([w class]), (double)w.windowLevel, w.isKeyWindow ? 1 : 0];
+            vcamDumpAllViews(w.rootViewController.view, dump, 0);
+            idx2++;
+        }
+        NSLog(@"[VCam] PROBE-UI tree len=%lu", (unsigned long)dump.length);
+        NSUInteger len = dump.length, pos = 0, ci = 0;
         while (pos < len) {
             NSUInteger chunk = MIN((NSUInteger)1100, len - pos);
-            NSLog(@"[VCam] PROBE-UI #%lu %@", (unsigned long)idx,
+            NSLog(@"[VCam] PROBE-UI #%lu %@", (unsigned long)ci,
                   [dump substringWithRange:NSMakeRange(pos, chunk)]);
             pos += chunk;
-            idx++;
+            ci++;
         }
-        NSLog(@"[VCam] PROBE-UI END (chunks=%lu)", (unsigned long)idx);
+        NSLog(@"[VCam] PROBE-UI END (chunks=%lu)", (unsigned long)ci);
         vcamBadge(@"已扫描，日志已记录");
     });
 }
