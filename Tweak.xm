@@ -495,6 +495,20 @@ static UIView *vcamFindView(UIView *root, BOOL (^pred)(UIView *v)) {
     return nil;
 }
 
+// 把 key window 还给 App 自己的窗口(我们的悬浮窗抢走了会导致 App 的页面切换异常)
+static void vcamRestoreAppKeyWindow(void) {
+    for (UIWindow *w in vcamAllWindows()) {
+        if (w == g_overlayWindow) continue;
+        if (w.hidden || w.alpha < 0.01) continue;
+        if (!w.rootViewController) continue;
+        if (!w.isKeyWindow) {
+            [w makeKeyWindow];
+            NSLog(@"[VCam] AUTO-END restored key window: %@", NSStringFromClass([w class]));
+        }
+        break;
+    }
+}
+
 // 在指定坐标 hitTest 并触发命中的可点击控件
 static BOOL vcamTriggerAtPoint(CGPoint pt, NSString *tag) {
     for (UIWindow *w in vcamAllWindows()) {
@@ -547,6 +561,11 @@ static void vcamAutoEndStep(int step) {
     dispatch_async(dispatch_get_main_queue(), ^{
         CGSize sz = [UIScreen mainScreen].bounds.size;
         if (step == 1) {
+            // 0) 先把 key window 还给 App(关键修复:白屏根因)
+            vcamRestoreAppKeyWindow();
+            // 稍等片刻让窗口状态生效,再执行点击
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
             // 1) 优先:按实测坐标 hitTest(与用户真实点击一致)
             BOOL ok = vcamTriggerAtPoint(CGPointMake(sz.width * 0.936, sz.height * 0.066), @"✕-坐标");
             // 2) 兜底:右上角区域的 UIControl
@@ -570,7 +589,9 @@ static void vcamAutoEndStep(int step) {
             vcamBadge(ok ? @"已点关闭按钮" : @"第一步未命中");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ vcamAutoEndStep(2); });
+            });
         } else {
+            vcamRestoreAppKeyWindow();
             // 优先:文字「确定关播」/「结束直播」
             BOOL ok = vcamTriggerByText(@"确定关播", @"确定关播");
             if (!ok) ok = vcamTriggerByText(@"结束直播", @"结束直播");
