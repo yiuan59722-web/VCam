@@ -579,6 +579,15 @@ static void vcamAutoEndStep(int step) {
                 ok = vcamTriggerAtPoint(CGPointMake(sz.width * 0.726, sz.height * 0.560), @"确定关播-坐标");
             }
             vcamBadge(ok ? @"已点确定关播" : @"第二步未命中");
+            // 下播完成后:延迟关闭虚拟相机(停止视频解码,避免残留干扰)
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                g_vcamEnabled = NO;
+                [[MediaManager sharedManager] stop];
+                vcamSetEnabledState(NO);
+                NSLog(@"[VCam] AUTO-END vcam stopped after live end");
+                vcamBadge(@"已下播，虚拟相机已关闭");
+            });
         }
     });
 }
