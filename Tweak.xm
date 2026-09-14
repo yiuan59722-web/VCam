@@ -648,8 +648,9 @@ static void vcamProbeContinuous(void) {
     g_probeSeq = 0;
     NSLog(@"[VCam] PROBE-SEQ begin (12 x 5s)");
     vcamProbeTick();
-    g_probeTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:[VCamMenuActions shared]
-                                                  selector:@selector(onProbeTick:) userInfo:nil repeats:YES];
+    g_probeTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) {
+        vcamProbeTick();
+    }];
     vcamBadge(@"连续扫描中（60秒）");
 }
 
