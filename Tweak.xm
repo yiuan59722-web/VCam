@@ -592,19 +592,65 @@ static void vcamAutoEndStep(int step) {
 static int g_dumpNodes = 0;
 
 static void vcamDumpAllViews(UIView *v, NSMutableString *out, int depth) {
-    if (!v || depth > 16) return;
-    if (++g_dumpNodes > 500) return;
+    if (!v || depth > 18) return;
+    if (++g_dumpNodes > 800) return;
     NSString *txt = vcamViewText(v);
     BOOL tappable = [v isKindOfClass:[UIControl class]] || v.gestureRecognizers.count > 0;
-    if (txt.length || tappable) {
-        [out appendFormat:@"%@%@%@ %@ %@\n",
-         [@"" stringByPaddingToLength:(NSUInteger)(depth * 2) withString:@" " startingAtIndex:0],
-         NSStringFromClass([v class]),
-         txt.length ? [NSString stringWithFormat:@" text=「%@」", txt] : @"",
-         tappable ? @"[可点]" : @"[不可点]",
-         NSStringFromCGRect([v convertRect:v.bounds toView:nil])];
-    }
+    BOOL interact = v.userInteractionEnabled;
+    [out appendFormat:@"%@%@%@%@%@ %@\n",
+     [@"" stringByPaddingToLength:(NSUInteger)(depth * 2) withString:@" " startingAtIndex:0],
+     NSStringFromClass([v class]),
+     txt.length ? [NSString stringWithFormat:@" text=「%@」", txt] : @"",
+     tappable ? @"[可点]" : @"",
+     interact ? @"" : @"[禁用]",
+     NSStringFromCGRect([v convertRect:v.bounds toView:nil])];
     for (UIView *s in v.subviews) vcamDumpAllViews(s, out, depth + 1);
+}
+
+static int g_probeSeq = 0;
+static NSTimer *g_probeTimer = nil;
+
+static void vcamProbeTick(void) {
+    NSArray<UIWindow *> *wins = vcamAllWindows();
+    NSMutableString *dump = [NSMutableString string];
+    g_dumpNodes = 0;
+    for (UIWindow *w in wins) {
+        if (w == g_overlayWindow) continue;
+        if (!w.rootViewController.view) continue;
+        [dump appendFormat:@"=== SEQ%ld WIN %@ level=%.0f ===\n",
+         (long)g_probeSeq, NSStringFromClass([w class]), (double)w.windowLevel];
+        vcamDumpAllViews(w.rootViewController.view, dump, 0);
+    }
+    NSLog(@"[VCam] PROBE-SEQ #%ld len=%lu", (long)g_probeSeq, (unsigned long)dump.length);
+    NSUInteger len = dump.length, pos = 0, ci = 0;
+    while (pos < len) {
+        NSUInteger chunk = MIN((NSUInteger)1100, len - pos);
+        NSLog(@"[VCam] PROBE-SEQ #%ld.%lu %@", (long)g_probeSeq, (unsigned long)ci,
+              [dump substringWithRange:NSMakeRange(pos, chunk)]);
+        pos += chunk;
+        ci++;
+    }
+    g_probeSeq++;
+    if (g_probeSeq >= 12) {
+        [g_probeTimer invalidate];
+        g_probeTimer = nil;
+        vcamBadge(@"连续扫描完成（看日志）");
+    }
+}
+
+static void vcamProbeContinuous(void) {
+    if (g_probeTimer) {
+        [g_probeTimer invalidate];
+        g_probeTimer = nil;
+        vcamBadge(@"已停止连续扫描");
+        return;
+    }
+    g_probeSeq = 0;
+    NSLog(@"[VCam] PROBE-SEQ begin (12 x 5s)");
+    vcamProbeTick();
+    g_probeTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:[VCamMenuActions shared]
+                                                  selector:@selector(onProbeTick:) userInfo:nil repeats:YES];
+    vcamBadge(@"连续扫描中（60秒）");
 }
 
 static void vcamProbeUI(void) {
@@ -706,6 +752,8 @@ static void vcamProbeUI(void) {
 - (void)onScheduleTimer:(id)sender;
 - (void)onTestEndLive:(id)sender;
 - (void)onProbeUI:(id)sender;
+- (void)onProbeContinuous:(id)sender;
+- (void)onProbeTick:(id)sender;
 @end
 
 @implementation VCamMenuActions
@@ -785,6 +833,15 @@ static void vcamProbeUI(void) {
     vcamHideMenu();
     vcamProbeUI();
 }
+
+- (void)onProbeContinuous:(id)sender {
+    vcamHideMenu();
+    vcamProbeContinuous();
+}
+
+- (void)onProbeTick:(id)sender {
+    vcamProbeTick();
+}
 @end
 
 static UIButton *vcamMenuRow(NSString *title, NSString *symbol, BOOL primary) {
@@ -815,7 +872,7 @@ static void vcamShowMenu(void) {
 
     CGRect screen = [UIScreen mainScreen].bounds;
     CGFloat W = 252.0;
-    CGFloat H = 480.0;
+    CGFloat H = 508.0;
 
     VCamCatcher *catcher = [[VCamCatcher alloc] initWithFrame:screen];
     catcher.backgroundColor = [UIColor clearColor];
@@ -923,6 +980,14 @@ static void vcamShowMenu(void) {
     probeBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
     [probeBtn addTarget:[VCamMenuActions shared] action:@selector(onProbeUI:) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:probeBtn];
+
+    UIButton *contBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    contBtn.frame = CGRectMake(18, 444, W - 36, 24);
+    [contBtn setTitle:@"连续扫描 60 秒（放直播界面自动记录）" forState:UIControlStateNormal];
+    [contBtn setTitleColor:[UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0] forState:UIControlStateNormal];
+    contBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [contBtn addTarget:[VCamMenuActions shared] action:@selector(onProbeContinuous:) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:contBtn];
 
     UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, H - 26, W, 14)];
     hint.text = @"轻点空白处收起";
