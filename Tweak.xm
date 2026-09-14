@@ -228,7 +228,7 @@ static void setupFloatButton() {
     b.center = c;
 
     vcamSetEnabledState(g_vcamEnabled);
-    vcamBadge(@"v10.23");
+    vcamBadge(@"v10.30");
 }
 
 static UIViewController *findTopViewController(void) {
@@ -543,48 +543,101 @@ static void vcamCollectTopRight(UIView *root, NSMutableArray *out) {
     for (UIView *sub in root.subviews) vcamCollectTopRight(sub, out);
 }
 
+// 深度优先找满足条件的视图
+static UIView *vcamFindView(UIView *root, BOOL (^pred)(UIView *v)) {
+    if (!root) return nil;
+    if (pred(root)) return root;
+    for (UIView *s in root.subviews) {
+        UIView *r = vcamFindView(s, pred);
+        if (r) return r;
+    }
+    return nil;
+}
+
+// 在指定坐标 hitTest 并触发命中的可点击控件
+static BOOL vcamTriggerAtPoint(CGPoint pt, NSString *tag) {
+    for (UIWindow *w in vcamAllWindows()) {
+        if (w == g_overlayWindow) continue;
+        if (w.hidden || w.alpha < 0.01) continue;
+        UIView *hit = [w hitTest:pt withEvent:nil];
+        if (!hit) continue;
+        NSMutableString *chain = [NSMutableString string];
+        UIView *v = hit;
+        for (int i = 0; i < 8 && v; i++) {
+            [chain appendFormat:@"%@%@", i ? @" < " : @"", NSStringFromClass([v class])];
+            v = v.superview;
+        }
+        NSLog(@"[VCam] AUTO-END %@ hit=%@ text=「%@」 chain=%@",
+              tag, NSStringFromClass([hit class]), vcamViewText(hit), chain);
+        v = hit;
+        for (int i = 0; i < 8 && v; i++) {
+            if ([v isKindOfClass:[UIControl class]]) {
+                [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+                NSLog(@"[VCam] AUTO-END %@ triggered %@", tag, NSStringFromClass([v class]));
+                return YES;
+            }
+            v = v.superview;
+        }
+        return NO;
+    }
+    return NO;
+}
+
+// 文字查找并触发(备用路径)
+static BOOL vcamTriggerByText(NSString *keyword, NSString *tag) {
+    for (UIView *root in vcamAppRootViews()) {
+        UIView *found = vcamFindView(root, ^BOOL(UIView *v) {
+            if (![v isKindOfClass:[UIControl class]]) return NO;
+            NSString *t = vcamViewText(v);
+            return t.length && [t rangeOfString:keyword].location != NSNotFound;
+        });
+        if (found) {
+            NSLog(@"[VCam] AUTO-END %@ found by text: %@ 「%@」",
+                  tag, NSStringFromClass([found class]), vcamViewText(found));
+            [(UIControl *)found sendActionsForControlEvents:UIControlEventTouchUpInside];
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// 实测坐标(390x844 基准):✕=(365,56)  确定关播=(283,473)
 static void vcamAutoEndStep(int step) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSArray<UIView *> *roots = vcamAppRootViews();
-        if (!roots.count) { NSLog(@"[VCam] AUTO-END no window"); return; }
-
-        NSArray *kws = (step == 1)
-            ? @[@"结束直播", @"关闭直播", @"关闭", @"退出", @"下播"]
-            : @[@"结束直播", @"确定结束", @"结束", @"确定", @"确认", @"下播"];
-
-        NSMutableArray *hits = [NSMutableArray array];
-        NSMutableString *dump = [NSMutableString string];
-        for (UIView *root in roots) {
-            vcamCollectTappables(root, kws, hits, dump);
-        }
-        NSLog(@"[VCam] AUTO-END step%d dump:\n%@", step, dump);
-
-        UIView *picked = nil;
-        if (hits.count) {
-            picked = hits.firstObject;
-            for (UIView *v in hits) { if ([v isKindOfClass:[UIButton class]]) { picked = v; break; } }
-        } else if (step == 1) {
-            // 没有文字命中：用"右上角区域"启发式找 ✕
-            NSMutableArray *tr = [NSMutableArray array];
-            for (UIView *root in roots) vcamCollectTopRight(root, tr);
-            if (tr.count) {
-                picked = tr.firstObject;
-                NSLog(@"[VCam] AUTO-END step1 fallback to top-right control (%lu candidates)", (unsigned long)tr.count);
-            }
-        }
-
-        if (picked) {
-            vcamTriggerTap(picked);
-        } else {
-            NSLog(@"[VCam] AUTO-END step%d no candidate", step);
-            if (step == 1) vcamBadge(@"未找到下播入口");
-        }
-
+        CGSize sz = [UIScreen mainScreen].bounds.size;
         if (step == 1) {
+            // 1) 优先:按实测坐标 hitTest(与用户真实点击一致)
+            BOOL ok = vcamTriggerAtPoint(CGPointMake(sz.width * 0.936, sz.height * 0.066), @"✕-坐标");
+            // 2) 兜底:右上角区域的 UIControl
+            if (!ok) {
+                for (UIView *root in vcamAppRootViews()) {
+                    UIView *btn = vcamFindView(root, ^BOOL(UIView *v) {
+                        if (![v isKindOfClass:[UIControl class]]) return NO;
+                        CGRect f = [v convertRect:v.bounds toView:nil];
+                        return CGRectGetMidX(f) > sz.width * 0.85 && CGRectGetMidY(f) < sz.height * 0.12 &&
+                               f.size.width > 10 && f.size.height > 10;
+                    });
+                    if (btn) {
+                        NSLog(@"[VCam] AUTO-END ✕ found by region: %@ 「%@」",
+                              NSStringFromClass([btn class]), vcamViewText(btn));
+                        [(UIControl *)btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+                        ok = YES;
+                        break;
+                    }
+                }
+            }
+            vcamBadge(ok ? @"已点关闭按钮" : @"第一步未命中");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ vcamAutoEndStep(2); });
         } else {
-            vcamBadge(@"已执行下播操作");
+            // 优先:文字「确定关播」/「结束直播」
+            BOOL ok = vcamTriggerByText(@"确定关播", @"确定关播");
+            if (!ok) ok = vcamTriggerByText(@"结束直播", @"结束直播");
+            if (!ok) {
+                // 兜底:按实测坐标
+                ok = vcamTriggerAtPoint(CGPointMake(sz.width * 0.726, sz.height * 0.560), @"确定关播-坐标");
+            }
+            vcamBadge(ok ? @"已点确定关播" : @"第二步未命中");
         }
     });
 }
