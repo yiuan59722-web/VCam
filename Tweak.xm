@@ -230,7 +230,7 @@ static void setupFloatButton() {
     b.center = c;
 
     vcamSetEnabledState(g_vcamEnabled);
-    vcamBadge(@"v10.30");
+    vcamBadge(@"v1.0");
 }
 
 static UIViewController *findTopViewController(void) {
