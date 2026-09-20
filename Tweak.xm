@@ -731,6 +731,17 @@ static void vcamProbeUI(void) {
     });
 }
 
+// 计算下一个 HH:mm 时刻：若今天该时刻已过（或距现在 ≤5 秒），自动顺延到明天。
+// 例：19:00 开播时选 01:00 → 排到"明天 01:00"，而不是报"时间已过"。
+static NSDate *vcamNextTimeOccurrence(NSInteger hour, NSInteger minute) {
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *target = [cal dateBySettingHour:hour minute:minute second:0 ofDate:[NSDate date] options:0];
+    if ([target timeIntervalSinceNow] <= 5) {
+        target = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:target options:0];
+    }
+    return target;
+}
+
 @interface VCamLiveEndScheduler : NSObject
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) NSDate *fireDate;
@@ -754,7 +765,10 @@ static void vcamProbeUI(void) {
     self.timer = [NSTimer scheduledTimerWithTimeInterval:iv target:self
                                                 selector:@selector(onFire) userInfo:nil repeats:NO];
     NSLog(@"[VCam] AUTO-END scheduled at %@ (%.0fs later)", date, iv);
-    vcamBadge([NSString stringWithFormat:@"%.0f 分钟后自动下播", iv / 60.0]);
+    NSDateComponents *dc = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:date];
+    BOOL tomorrow = ![[NSCalendar currentCalendar] isDateInToday:date];
+    vcamBadge([NSString stringWithFormat:@"%@ %02ld:%02ld 自动下播",
+               tomorrow ? @"明天" : @"今天", (long)dc.hour, (long)dc.minute]);
 }
 - (void)cancel {
     if (self.timer) { [self.timer invalidate]; self.timer = nil; }
@@ -863,13 +877,7 @@ static void vcamProbeUI(void) {
     NSDate *picked = g_menuTimeValue ?: [NSDate dateWithTimeIntervalSinceNow:1800];
     NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute)
                                                           fromDate:picked];
-    NSDate *target = [[NSCalendar currentCalendar] dateBySettingHour:c.hour minute:c.minute second:0
-                                                              ofDate:[NSDate date] options:0];
-    if ([target timeIntervalSinceNow] <= 5) {
-        vcamBadge(@"时间已过，请重新选择");
-        sw.on = NO;
-        return;
-    }
+    NSDate *target = vcamNextTimeOccurrence(c.hour, c.minute);
     [s scheduleAt:target];
 }
 
@@ -885,12 +893,7 @@ static void vcamProbeUI(void) {
     if (!dp) return;
     NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute)
                                                           fromDate:dp.date];
-    NSDate *target = [[NSCalendar currentCalendar] dateBySettingHour:c.hour minute:c.minute second:0
-                                                              ofDate:[NSDate date] options:0];
-    if ([target timeIntervalSinceNow] <= 5) {
-        vcamBadge(@"时间已过，请重新选择");
-        return;
-    }
+    NSDate *target = vcamNextTimeOccurrence(c.hour, c.minute);
     [s scheduleAt:target];
     vcamHideMenu();
 }
